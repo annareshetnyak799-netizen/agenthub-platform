@@ -32,5 +32,39 @@ tests/      Integration, load, and failure scenario tests
 
 ## Status
 
-Repository scaffold initialized. Core services and Docker Compose setup are the next step.
+Repository scaffold initialized with a Level 1 development skeleton:
 
+- `api-gateway`
+- `router-service`
+- `mock-provider-openai`
+- `mock-provider-anthropic`
+- `docker-compose.yml`
+
+## Quick Start
+
+```bash
+docker compose up --build
+```
+
+Monitoring endpoints after startup:
+
+- Gateway: `http://localhost:8000/metrics`
+- Router: `http://localhost:8005/metrics`
+- Mock OpenAI: `http://localhost:8101/metrics`
+- Mock Anthropic: `http://localhost:8102/metrics`
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3000` with `admin/admin`
+
+Example request:
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "shared-demo-model",
+    "stream": false,
+    "messages": [{"role": "user", "content": "Hello from AgentHub"}]
+  }'
+```
+
+The gateway asks the router to select a provider and then proxies the request to the selected mock provider.

@@ -1,0 +1,131 @@
+version: "3.9"
+
+services:
+  api-gateway:
+    build:
+      context: ./services/api_gateway
+    container_name: api-gateway
+    environment:
+      SERVICE_NAME: api-gateway
+      LOG_LEVEL: INFO
+      ROUTER_URL: http://router-service:8001
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - router-service
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  router-service:
+    build:
+      context: ./services/router_service
+    container_name: router-service
+    environment:
+      SERVICE_NAME: router-service
+      LOG_LEVEL: INFO
+      ROUTER_HOST: 0.0.0.0
+      ROUTER_PORT: 8001
+      PROVIDER_CONFIG: >
+        [
+          {
+            "provider_id": "mock-openai",
+            "provider_name": "mock-openai",
+            "base_url": "http://mock-provider-openai:8101",
+            "supported_models": ["gpt-4o-mini", "shared-demo-model"],
+            "weight": 1
+          },
+          {
+            "provider_id": "mock-anthropic",
+            "provider_name": "mock-anthropic",
+            "base_url": "http://mock-provider-anthropic:8102",
+            "supported_models": ["claude-3-haiku", "shared-demo-model"],
+            "weight": 1
+          }
+        ]
+    ports:
+      - "8005:8001"
+    depends_on:
+      - mock-provider-openai
+      - mock-provider-anthropic
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  mock-provider-openai:
+    build:
+      context: ./services/mock_provider_openai
+    container_name: mock-provider-openai
+    environment:
+      SERVICE_NAME: mock-provider-openai
+      PROVIDER_ID: mock-openai
+      PROVIDER_NAME: mock-openai
+      PROVIDER_PORT: 8101
+      DEFAULT_MODEL: gpt-4o-mini
+      STREAM_DELAY_SECONDS: 0.15
+      BASE_LATENCY_MS: 250
+    ports:
+      - "8101:8101"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8101/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  mock-provider-anthropic:
+    build:
+      context: ./services/mock_provider_anthropic
+    container_name: mock-provider-anthropic
+    environment:
+      SERVICE_NAME: mock-provider-anthropic
+      PROVIDER_ID: mock-anthropic
+      PROVIDER_NAME: mock-anthropic
+      PROVIDER_PORT: 8102
+      DEFAULT_MODEL: claude-3-haiku
+      STREAM_DELAY_SECONDS: 0.25
+      BASE_LATENCY_MS: 400
+    ports:
+      - "8102:8102"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8102/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - api-gateway
+      - router-service
+      - mock-provider-openai
+      - mock-provider-anthropic
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
