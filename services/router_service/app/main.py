@@ -8,6 +8,12 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from pydantic import BaseModel
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
@@ -15,6 +21,10 @@ app = FastAPI(title="router-service", version="0.1.0")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "router-service")
 PROVIDER_CONFIG = os.getenv("PROVIDER_CONFIG", "[]")
+OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "http://otel-collector:4317",
+)
 
 
 class RouteRequest(BaseModel):
@@ -47,6 +57,25 @@ ROUTING_ERRORS = Counter(
     "Routing errors returned by the router.",
     ["reason"],
 )
+
+
+def setup_telemetry() -> None:
+    resource = Resource.create({"service.name": SERVICE_NAME})
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(
+        BatchSpanProcessor(
+            OTLPSpanExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT, insecure=True)
+        )
+    )
+    trace.set_tracer_provider(provider)
+    FastAPIInstrumentor.instrument_app(
+        app,
+        excluded_urls="/health,/metrics",
+    )
+
+
+setup_telemetry()
+tracer = trace.get_tracer(__name__)
 
 
 def normalize_path(path: str) -> str:
@@ -121,25 +150,32 @@ async def routing_stats() -> dict[str, Any]:
 
 @app.post("/route")
 async def route(request: RouteRequest) -> dict[str, str]:
-    if request.model not in round_robin_cycles:
-        ROUTING_ERRORS.labels(reason="model_not_registered").inc()
-        raise HTTPException(
-            status_code=404,
-            detail=f"No provider registered for model '{request.model}'",
-        )
+    with tracer.start_as_current_span("router.route") as span:
+        span.set_attribute("llm.model", request.model)
+        span.set_attribute("llm.stream", bool(request.stream))
 
-    with cycle_lock:
-        provider = next(round_robin_cycles[request.model])
+        if request.model not in round_robin_cycles:
+            ROUTING_ERRORS.labels(reason="model_not_registered").inc()
+            span.set_attribute("error", True)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No provider registered for model '{request.model}'",
+            )
 
-    ROUTING_DECISIONS.labels(
-        provider_id=provider["provider_id"],
-        model=request.model,
-        strategy="model_round_robin",
-    ).inc()
+        with cycle_lock:
+            provider = next(round_robin_cycles[request.model])
 
-    return {
-        "provider_id": provider["provider_id"],
-        "provider_name": provider["provider_name"],
-        "provider_url": provider["base_url"],
-        "strategy": "model_round_robin",
-    }
+        span.set_attribute("llm.selected_provider", provider["provider_id"])
+        span.set_attribute("llm.routing_strategy", "model_round_robin")
+        ROUTING_DECISIONS.labels(
+            provider_id=provider["provider_id"],
+            model=request.model,
+            strategy="model_round_robin",
+        ).inc()
+
+        return {
+            "provider_id": provider["provider_id"],
+            "provider_name": provider["provider_name"],
+            "provider_url": provider["base_url"],
+            "strategy": "model_round_robin",
+        }

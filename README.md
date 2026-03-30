@@ -54,6 +54,7 @@ Monitoring endpoints after startup:
 - Mock Anthropic: `http://localhost:8102/metrics`
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000` with `admin/admin`
+- Jaeger: `http://localhost:16686`
 
 Example request:
 

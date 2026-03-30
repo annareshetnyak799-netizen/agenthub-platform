@@ -1,3 +1,6 @@
 fastapi==0.115.0
+opentelemetry-exporter-otlp-proto-grpc==1.27.0
+opentelemetry-instrumentation-fastapi==0.48b0
+opentelemetry-sdk==1.27.0
 prometheus-client==0.20.0
 uvicorn==0.30.6

@@ -7,6 +7,12 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 app = FastAPI(title="mock-provider-anthropic", version="0.1.0")
@@ -17,6 +23,10 @@ PROVIDER_NAME = os.getenv("PROVIDER_NAME", "mock-anthropic")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "claude-3-haiku")
 STREAM_DELAY_SECONDS = float(os.getenv("STREAM_DELAY_SECONDS", "0.25"))
 BASE_LATENCY_MS = int(os.getenv("BASE_LATENCY_MS", "400"))
+OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "http://otel-collector:4317",
+)
 REQUEST_COUNT = Counter(
     "agenthub_http_requests_total",
     "Total HTTP requests handled by a service.",
@@ -37,6 +47,25 @@ LLM_TOKENS = Counter(
     "Token counts emitted by a mock provider.",
     ["provider_id", "direction"],
 )
+
+
+def setup_telemetry() -> None:
+    resource = Resource.create({"service.name": SERVICE_NAME})
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(
+        BatchSpanProcessor(
+            OTLPSpanExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT, insecure=True)
+        )
+    )
+    trace.set_tracer_provider(provider)
+    FastAPIInstrumentor.instrument_app(
+        app,
+        excluded_urls="/health,/metrics",
+    )
+
+
+setup_telemetry()
+tracer = trace.get_tracer(__name__)
 
 
 def normalize_path(path: str) -> str:
@@ -99,70 +128,76 @@ async def chat_completions(request: Request) -> Any:
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
-    await asyncio.sleep(BASE_LATENCY_MS / 1000)
-    LLM_REQUESTS.labels(
-        provider_id=PROVIDER_ID,
-        model=model,
-        stream=str(bool(payload.get("stream"))).lower(),
-    ).inc()
+    with tracer.start_as_current_span("provider.chat_completions") as span:
+        span.set_attribute("llm.provider_id", PROVIDER_ID)
+        span.set_attribute("llm.model", model)
+        span.set_attribute("llm.stream", bool(payload.get("stream")))
+        span.set_attribute("llm.simulated_latency_ms", BASE_LATENCY_MS)
 
-    if payload.get("stream"):
-        prompt_tokens = max(len(" ".join(m.get("content", "") for m in payload.get("messages", []))) // 6, 1)
-        completion_tokens = max(len(text.split()), 1)
-        LLM_TOKENS.labels(provider_id=PROVIDER_ID, direction="input").inc(prompt_tokens)
-        LLM_TOKENS.labels(provider_id=PROVIDER_ID, direction="output").inc(completion_tokens)
+        await asyncio.sleep(BASE_LATENCY_MS / 1000)
+        LLM_REQUESTS.labels(
+            provider_id=PROVIDER_ID,
+            model=model,
+            stream=str(bool(payload.get("stream"))).lower(),
+        ).inc()
 
-        async def event_stream():
-            for token in text.split():
-                chunk = {
+        if payload.get("stream"):
+            prompt_tokens = max(len(" ".join(m.get("content", "") for m in payload.get("messages", []))) // 6, 1)
+            completion_tokens = max(len(text.split()), 1)
+            LLM_TOKENS.labels(provider_id=PROVIDER_ID, direction="input").inc(prompt_tokens)
+            LLM_TOKENS.labels(provider_id=PROVIDER_ID, direction="output").inc(completion_tokens)
+
+            async def event_stream():
+                for token in text.split():
+                    chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "provider": PROVIDER_NAME,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": token + " "},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    await asyncio.sleep(STREAM_DELAY_SECONDS)
+
+                final_chunk = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": model,
                     "provider": PROVIDER_NAME,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": token + " "},
-                            "finish_reason": None,
-                        }
-                    ],
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 }
-                yield f"data: {json.dumps(chunk)}\n\n"
-                await asyncio.sleep(STREAM_DELAY_SECONDS)
+                yield f"data: {json.dumps(final_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
 
-            final_chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "provider": PROVIDER_NAME,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }
-            yield f"data: {json.dumps(final_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
+            return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-    response = {
-        "id": completion_id,
-        "object": "chat.completion",
-        "created": created,
-        "model": model,
-        "provider": PROVIDER_NAME,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {
-            "prompt_tokens": max(len(text) // 6, 1),
-            "completion_tokens": max(len(text.split()), 1),
-            "total_tokens": max(len(text) // 6, 1) + max(len(text.split()), 1),
-        },
-    }
-    LLM_TOKENS.labels(provider_id=PROVIDER_ID, direction="input").inc(response["usage"]["prompt_tokens"])
-    LLM_TOKENS.labels(provider_id=PROVIDER_ID, direction="output").inc(response["usage"]["completion_tokens"])
-    return JSONResponse(content=response)
+        response = {
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "provider": PROVIDER_NAME,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": max(len(text) // 6, 1),
+                "completion_tokens": max(len(text.split()), 1),
+                "total_tokens": max(len(text) // 6, 1) + max(len(text.split()), 1),
+            },
+        }
+        LLM_TOKENS.labels(provider_id=PROVIDER_ID, direction="input").inc(response["usage"]["prompt_tokens"])
+        LLM_TOKENS.labels(provider_id=PROVIDER_ID, direction="output").inc(response["usage"]["completion_tokens"])
+        return JSONResponse(content=response)

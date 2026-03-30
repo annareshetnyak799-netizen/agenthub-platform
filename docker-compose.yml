@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   api-gateway:
     build:
@@ -8,6 +6,7 @@ services:
     environment:
       SERVICE_NAME: api-gateway
       LOG_LEVEL: INFO
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       ROUTER_URL: http://router-service:8001
       GATEWAY_HOST: 0.0.0.0
       GATEWAY_PORT: 8000
@@ -15,6 +14,7 @@ services:
       - "8000:8000"
     depends_on:
       - router-service
+      - otel-collector
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
       interval: 10s
@@ -28,6 +28,7 @@ services:
     environment:
       SERVICE_NAME: router-service
       LOG_LEVEL: INFO
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       ROUTER_HOST: 0.0.0.0
       ROUTER_PORT: 8001
       PROVIDER_CONFIG: >
@@ -52,6 +53,7 @@ services:
     depends_on:
       - mock-provider-openai
       - mock-provider-anthropic
+      - otel-collector
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
       interval: 10s
@@ -68,6 +70,7 @@ services:
       PROVIDER_NAME: mock-openai
       PROVIDER_PORT: 8101
       DEFAULT_MODEL: gpt-4o-mini
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       STREAM_DELAY_SECONDS: 0.15
       BASE_LATENCY_MS: 250
     ports:
@@ -88,6 +91,7 @@ services:
       PROVIDER_NAME: mock-anthropic
       PROVIDER_PORT: 8102
       DEFAULT_MODEL: claude-3-haiku
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       STREAM_DELAY_SECONDS: 0.25
       BASE_LATENCY_MS: 400
     ports:
@@ -129,3 +133,25 @@ services:
       - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.59
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      COLLECTOR_OTLP_GRPC_HOST_PORT: 0.0.0.0:4317
+      COLLECTOR_OTLP_HTTP_HOST_PORT: 0.0.0.0:4318
+    ports:
+      - "16686:16686"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.107.0
+    container_name: otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./infra/otel/otel-collector-config.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - jaeger
