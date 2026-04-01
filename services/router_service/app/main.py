@@ -2,10 +2,10 @@ import json
 import os
 import time
 from collections import defaultdict
-from itertools import cycle
 from threading import Lock
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from opentelemetry import trace
@@ -21,6 +21,10 @@ app = FastAPI(title="router-service", version="0.1.0")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "router-service")
 PROVIDER_CONFIG = os.getenv("PROVIDER_CONFIG", "[]")
+PROVIDER_REGISTRY_URL = os.getenv(
+    "PROVIDER_REGISTRY_URL",
+    "http://provider-registry:8002",
+)
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "http://otel-collector:4317",
@@ -34,8 +38,8 @@ class RouteRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-providers = json.loads(PROVIDER_CONFIG)
-round_robin_cycles: dict[str, Any] = {}
+fallback_providers = json.loads(PROVIDER_CONFIG)
+round_robin_indices: dict[str, int] = {}
 cycle_lock = Lock()
 REQUEST_COUNT = Counter(
     "agenthub_http_requests_total",
@@ -117,20 +121,48 @@ async def metrics_middleware(request: Request, call_next):
 
 
 def build_cycles() -> None:
+    round_robin_indices.clear()
     by_model = defaultdict(list)
+    for provider in fallback_providers:
+        for model in provider["supported_models"]:
+            by_model[model].append(provider)
+
+    for model in by_model:
+        round_robin_indices[model] = 0
+
+
+build_cycles()
+
+
+def build_provider_map(providers: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_model = defaultdict(list)
+
     for provider in providers:
         for model in provider["supported_models"]:
             by_model[model].append(provider)
 
+    expanded: dict[str, list[dict[str, Any]]] = {}
     for model, model_providers in by_model.items():
         weighted = []
         for provider in model_providers:
             weight = max(int(provider.get("weight", 1)), 1)
             weighted.extend([provider] * weight)
-        round_robin_cycles[model] = cycle(weighted)
+        expanded[model] = weighted
+
+    return expanded
 
 
-build_cycles()
+async def get_active_providers() -> tuple[list[dict[str, Any]], str]:
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
+            response = await client.get(
+                f"{PROVIDER_REGISTRY_URL}/providers",
+                params={"enabled_only": "true", "healthy_only": "true"},
+            )
+            response.raise_for_status()
+            return response.json(), "provider_registry"
+    except httpx.HTTPError:
+        return fallback_providers, "static_fallback"
 
 
 @app.get("/health")
@@ -145,7 +177,13 @@ async def metrics() -> Response:
 
 @app.get("/routing/stats")
 async def routing_stats() -> dict[str, Any]:
-    return {"providers": providers, "models": sorted(round_robin_cycles.keys())}
+    providers, source = await get_active_providers()
+    provider_map = build_provider_map(providers)
+    return {
+        "source": source,
+        "providers": providers,
+        "models": sorted(provider_map.keys()),
+    }
 
 
 @app.post("/route")
@@ -153,8 +191,11 @@ async def route(request: RouteRequest) -> dict[str, str]:
     with tracer.start_as_current_span("router.route") as span:
         span.set_attribute("llm.model", request.model)
         span.set_attribute("llm.stream", bool(request.stream))
+        providers, source = await get_active_providers()
+        provider_map = build_provider_map(providers)
+        span.set_attribute("provider.source", source)
 
-        if request.model not in round_robin_cycles:
+        if request.model not in provider_map:
             ROUTING_ERRORS.labels(reason="model_not_registered").inc()
             span.set_attribute("error", True)
             raise HTTPException(
@@ -163,7 +204,10 @@ async def route(request: RouteRequest) -> dict[str, str]:
             )
 
         with cycle_lock:
-            provider = next(round_robin_cycles[request.model])
+            candidates = provider_map[request.model]
+            current_index = round_robin_indices.get(request.model, 0)
+            provider = candidates[current_index % len(candidates)]
+            round_robin_indices[request.model] = (current_index + 1) % len(candidates)
 
         span.set_attribute("llm.selected_provider", provider["provider_id"])
         span.set_attribute("llm.routing_strategy", "model_round_robin")

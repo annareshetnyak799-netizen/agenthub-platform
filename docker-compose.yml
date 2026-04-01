@@ -29,6 +29,7 @@ services:
       SERVICE_NAME: router-service
       LOG_LEVEL: INFO
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      PROVIDER_REGISTRY_URL: http://provider-registry:8002
       ROUTER_HOST: 0.0.0.0
       ROUTER_PORT: 8001
       PROVIDER_CONFIG: >
@@ -51,6 +52,7 @@ services:
     ports:
       - "8005:8001"
     depends_on:
+      - provider-registry
       - mock-provider-openai
       - mock-provider-anthropic
       - otel-collector
@@ -102,6 +104,50 @@ services:
       timeout: 3s
       retries: 5
 
+  provider-registry:
+    build:
+      context: ./services/provider_registry
+    container_name: provider-registry
+    environment:
+      SERVICE_NAME: provider-registry
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      INITIAL_PROVIDERS: >
+        [
+          {
+            "provider_id": "mock-openai",
+            "provider_name": "mock-openai",
+            "base_url": "http://mock-provider-openai:8101",
+            "supported_models": ["gpt-4o-mini", "shared-demo-model"],
+            "weight": 1,
+            "price_input_per_1k": 0.15,
+            "price_output_per_1k": 0.60,
+            "priority": 100,
+            "enabled": true,
+            "health_status": "healthy"
+          },
+          {
+            "provider_id": "mock-anthropic",
+            "provider_name": "mock-anthropic",
+            "base_url": "http://mock-provider-anthropic:8102",
+            "supported_models": ["claude-3-haiku", "shared-demo-model"],
+            "weight": 1,
+            "price_input_per_1k": 0.12,
+            "price_output_per_1k": 0.48,
+            "priority": 100,
+            "enabled": true,
+            "health_status": "healthy"
+          }
+        ]
+    ports:
+      - "8006:8002"
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: prometheus
@@ -115,6 +161,7 @@ services:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on:
       - api-gateway
+      - provider-registry
       - router-service
       - mock-provider-openai
       - mock-provider-anthropic

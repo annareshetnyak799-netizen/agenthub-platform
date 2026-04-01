@@ -36,6 +36,7 @@ Repository scaffold initialized with a Level 1 development skeleton:
 
 - `api-gateway`
 - `router-service`
+- `provider-registry`
 - `mock-provider-openai`
 - `mock-provider-anthropic`
 - `docker-compose.yml`
@@ -50,6 +51,7 @@ Monitoring endpoints after startup:
 
 - Gateway: `http://localhost:8000/metrics`
 - Router: `http://localhost:8005/metrics`
+- Provider Registry: `http://localhost:8002/metrics`
 - Mock OpenAI: `http://localhost:8101/metrics`
 - Mock Anthropic: `http://localhost:8102/metrics`
 - Prometheus: `http://localhost:9090`
@@ -69,3 +71,8 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 ```
 
 The gateway asks the router to select a provider and then proxies the request to the selected mock provider.
+
+## Level 2 In Progress
+
+The first Level 2 service is `provider-registry`.
+It stores provider metadata in memory, supports runtime registration, and is now used by `router-service` as the primary source of active providers, with static config kept as a fallback path.
