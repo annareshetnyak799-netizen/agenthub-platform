@@ -59,6 +59,7 @@ Monitoring endpoints after startup:
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000` with `admin/admin`
 - Jaeger: `http://localhost:16686`
+- MLflow: `http://localhost:5001`
 
 Example request:
 
@@ -93,3 +94,6 @@ The gateway now also exposes Level 2 request telemetry for LLM traffic:
 - `agenthub_gateway_llm_tokens_total`
 - `agenthub_gateway_llm_cost_total`
 - `agenthub_gateway_llm_failovers_total`
+
+MLflow is also wired in as a request-level tracking UI.
+Each gateway request is logged as a run with provider, model, routing strategy, tokens, latency, TTFT, TPOT, cost, and failover metadata.

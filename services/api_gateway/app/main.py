@@ -1,11 +1,14 @@
+import asyncio
 import json
 import os
 import time
 from typing import Any
 
 import httpx
+import mlflow
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from mlflow.tracking import MlflowClient
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -26,6 +29,12 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "api-gateway")
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "http://otel-collector:4317",
+)
+MLFLOW_ENABLED = os.getenv("MLFLOW_ENABLED", "true").lower() == "true"
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+MLFLOW_EXPERIMENT_NAME = os.getenv(
+    "MLFLOW_EXPERIMENT_NAME",
+    "agenthub-gateway-requests",
 )
 
 REQUEST_COUNT = Counter(
@@ -73,6 +82,9 @@ LLM_FAILOVERS = Counter(
     "Failovers performed by the gateway after provider-side failures.",
     ["failed_provider_id", "fallback_provider_id", "model"],
 )
+mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+mlflow_client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
+mlflow_experiment_id: str | None = None
 
 
 def setup_telemetry() -> None:
@@ -103,6 +115,21 @@ def normalize_path(path: str) -> str:
     if path.startswith("/v1/chat/completions"):
         return "/v1/chat/completions"
     return path
+
+
+def get_mlflow_experiment_id() -> str | None:
+    global mlflow_experiment_id
+    if not MLFLOW_ENABLED:
+        return None
+    if mlflow_experiment_id is not None:
+        return mlflow_experiment_id
+
+    experiment = mlflow.get_experiment_by_name(MLFLOW_EXPERIMENT_NAME)
+    if experiment is None:
+        mlflow_experiment_id = mlflow.create_experiment(MLFLOW_EXPERIMENT_NAME)
+    else:
+        mlflow_experiment_id = experiment.experiment_id
+    return mlflow_experiment_id
 
 
 def estimate_prompt_tokens(messages: list[dict[str, Any]] | None) -> int:
@@ -186,6 +213,104 @@ def annotate_span_with_llm_telemetry(
         span.set_attribute("llm.ttft_ms", ttft_seconds * 1000)
     if tpot_seconds is not None:
         span.set_attribute("llm.tpot_ms", tpot_seconds * 1000)
+
+
+def log_request_to_mlflow_sync(
+    route: dict[str, Any],
+    model: str,
+    stream_flag: bool,
+    prompt_tokens: int,
+    completion_tokens: int,
+    ttft_seconds: float | None,
+    tpot_seconds: float | None,
+    cost: float,
+    failover: bool,
+    total_latency_seconds: float,
+    status_code: int,
+) -> None:
+    experiment_id = get_mlflow_experiment_id()
+    if experiment_id is None:
+        return
+
+    run = mlflow_client.create_run(
+        experiment_id=experiment_id,
+        tags={
+            "service": SERVICE_NAME,
+            "provider_id": route["provider_id"],
+            "model": model,
+            "stream": str(stream_flag).lower(),
+            "routing_strategy": route.get("strategy", ""),
+            "target_agent": route.get("target_agent", "") or "",
+        },
+    )
+    run_id = run.info.run_id
+    status = "FINISHED" if status_code < 400 else "FAILED"
+
+    try:
+        params = {
+            "provider_id": route["provider_id"],
+            "provider_name": route.get("provider_name", ""),
+            "model": model,
+            "stream": str(stream_flag).lower(),
+            "routing_strategy": route.get("strategy", ""),
+            "target_agent": route.get("target_agent", "") or "",
+            "status_code": str(status_code),
+            "failover": str(failover).lower(),
+        }
+        for key, value in params.items():
+            mlflow_client.log_param(run_id, key, value)
+
+        metrics = {
+            "prompt_tokens": float(prompt_tokens),
+            "completion_tokens": float(completion_tokens),
+            "total_tokens": float(prompt_tokens + completion_tokens),
+            "request_cost_usd": float(cost),
+            "request_latency_seconds": float(total_latency_seconds),
+        }
+        if ttft_seconds is not None:
+            metrics["ttft_seconds"] = float(ttft_seconds)
+        if tpot_seconds is not None:
+            metrics["tpot_seconds"] = float(tpot_seconds)
+
+        for key, value in metrics.items():
+            mlflow_client.log_metric(run_id, key, value)
+    finally:
+        mlflow_client.set_terminated(run_id, status=status)
+
+
+async def log_request_to_mlflow(
+    route: dict[str, Any],
+    model: str,
+    stream_flag: bool,
+    prompt_tokens: int,
+    completion_tokens: int,
+    ttft_seconds: float | None,
+    tpot_seconds: float | None,
+    cost: float,
+    failover: bool,
+    total_latency_seconds: float,
+    status_code: int,
+) -> None:
+    if not MLFLOW_ENABLED:
+        return
+    try:
+        await asyncio.to_thread(
+            log_request_to_mlflow_sync,
+            route,
+            model,
+            stream_flag,
+            prompt_tokens,
+            completion_tokens,
+            ttft_seconds,
+            tpot_seconds,
+            cost,
+            failover,
+            total_latency_seconds,
+            status_code,
+        )
+    except Exception:
+        # MLflow logging is best-effort and must never break the user path.
+        return
 
 
 def extract_usage_from_response(response_payload: dict[str, Any], payload: dict[str, Any]) -> tuple[int, int]:
@@ -471,6 +596,19 @@ async def chat_completions(request: Request) -> Any:
                                         cost,
                                         True,
                                     )
+                                    await log_request_to_mlflow(
+                                        retry_route,
+                                        model,
+                                        True,
+                                        stream_state.prompt_tokens,
+                                        stream_state.completion_tokens,
+                                        ttft_seconds,
+                                        tpot_seconds,
+                                        cost,
+                                        True,
+                                        time.perf_counter() - request_started,
+                                        retry_response.status_code,
+                                    )
                                     stream_state.recorded = True
                                 await retry_response.aclose()
                                 await retry_client.aclose()
@@ -525,6 +663,19 @@ async def chat_completions(request: Request) -> Any:
                             tpot_seconds,
                             cost,
                             False,
+                        )
+                        await log_request_to_mlflow(
+                            route,
+                            model,
+                            True,
+                            stream_state.prompt_tokens,
+                            stream_state.completion_tokens,
+                            ttft_seconds,
+                            tpot_seconds,
+                            cost,
+                            False,
+                            time.perf_counter() - request_started,
+                            upstream_response.status_code,
                         )
                         stream_state.recorded = True
                     await upstream_response.aclose()
@@ -618,6 +769,19 @@ async def chat_completions(request: Request) -> Any:
                         cost,
                         True,
                     )
+                    await log_request_to_mlflow(
+                        retry_route,
+                        model,
+                        False,
+                        prompt_tokens,
+                        completion_tokens,
+                        ttft_seconds,
+                        None,
+                        cost,
+                        True,
+                        time.perf_counter() - request_started,
+                        retry_response.status_code,
+                    )
 
                 return JSONResponse(
                     content=json.loads(retry_response.text),
@@ -656,6 +820,19 @@ async def chat_completions(request: Request) -> Any:
                 None,
                 cost,
                 False,
+            )
+            await log_request_to_mlflow(
+                route,
+                model,
+                False,
+                prompt_tokens,
+                completion_tokens,
+                ttft_seconds,
+                None,
+                cost,
+                False,
+                time.perf_counter() - request_started,
+                provider_response.status_code,
             )
 
         content_type = provider_response.headers.get("content-type", "application/json")

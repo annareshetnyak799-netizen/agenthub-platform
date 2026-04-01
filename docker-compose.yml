@@ -11,9 +11,13 @@ services:
       ROUTER_URL: http://router-service:8001
       GATEWAY_HOST: 0.0.0.0
       GATEWAY_PORT: 8000
+      MLFLOW_ENABLED: "true"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT_NAME: agenthub-gateway-requests
     ports:
       - "8000:8000"
     depends_on:
+      - mlflow
       - router-service
       - otel-collector
     healthcheck:
@@ -234,6 +238,20 @@ services:
     ports:
       - "16686:16686"
 
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    container_name: mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    ports:
+      - "5001:5000"
+    volumes:
+      - mlflow-data:/mlflow
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.107.0
     container_name: otel-collector
@@ -245,3 +263,6 @@ services:
       - "4318:4318"
     depends_on:
       - jaeger
+
+volumes:
+  mlflow-data:
