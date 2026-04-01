@@ -25,6 +25,10 @@ PROVIDER_REGISTRY_URL = os.getenv(
     "PROVIDER_REGISTRY_URL",
     "http://provider-registry:8002",
 )
+AGENT_REGISTRY_URL = os.getenv(
+    "AGENT_REGISTRY_URL",
+    "http://agent-registry:8003",
+)
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "http://otel-collector:4317",
@@ -33,6 +37,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
 
 class RouteRequest(BaseModel):
     model: str
+    target_agent: str | None = None
+    exclude_provider_ids: list[str] | None = None
     stream: bool | None = False
     messages: list[dict[str, Any]] | None = None
     metadata: dict[str, Any] | None = None
@@ -152,6 +158,43 @@ def build_provider_map(providers: list[dict[str, Any]]) -> dict[str, list[dict[s
     return expanded
 
 
+def select_provider(
+    model: str,
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    min_priority = min(int(candidate.get("priority", 100)) for candidate in candidates)
+    priority_candidates = [
+        candidate
+        for candidate in candidates
+        if int(candidate.get("priority", 100)) == min_priority
+    ]
+
+    all_have_latency = all(
+        candidate.get("last_latency_ms") is not None
+        for candidate in priority_candidates
+    )
+
+    if all_have_latency:
+        min_latency = min(float(candidate["last_latency_ms"]) for candidate in priority_candidates)
+        best_candidates = [
+            candidate
+            for candidate in priority_candidates
+            if float(candidate["last_latency_ms"]) == min_latency
+        ]
+        strategy = "priority_latency_aware"
+    else:
+        best_candidates = priority_candidates
+        strategy = "model_round_robin"
+
+    if len(best_candidates) == 1:
+        return best_candidates[0], strategy
+
+    current_index = round_robin_indices.get(model, 0)
+    selected = best_candidates[current_index % len(best_candidates)]
+    round_robin_indices[model] = (current_index + 1) % len(best_candidates)
+    return selected, strategy
+
+
 async def get_active_providers() -> tuple[list[dict[str, Any]], str]:
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
@@ -163,6 +206,24 @@ async def get_active_providers() -> tuple[list[dict[str, Any]], str]:
             return response.json(), "provider_registry"
     except httpx.HTTPError:
         return fallback_providers, "static_fallback"
+
+
+async def validate_target_agent(target_agent: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
+        response = await client.get(f"{AGENT_REGISTRY_URL}/agents/{target_agent}")
+        if response.status_code == 404:
+            ROUTING_ERRORS.labels(reason="agent_not_registered").inc()
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent '{target_agent}' not found",
+            )
+        if response.status_code >= 400:
+            ROUTING_ERRORS.labels(reason="agent_registry_unavailable").inc()
+            raise HTTPException(
+                status_code=503,
+                detail="Agent registry unavailable",
+            )
+        return response.json()
 
 
 @app.get("/health")
@@ -187,11 +248,26 @@ async def routing_stats() -> dict[str, Any]:
 
 
 @app.post("/route")
-async def route(request: RouteRequest) -> dict[str, str]:
+async def route(request: RouteRequest) -> dict[str, Any]:
     with tracer.start_as_current_span("router.route") as span:
         span.set_attribute("llm.model", request.model)
         span.set_attribute("llm.stream", bool(request.stream))
+        selected_agent = None
+        if request.target_agent:
+            selected_agent = await validate_target_agent(request.target_agent)
+            span.set_attribute("agent.id", request.target_agent)
+
         providers, source = await get_active_providers()
+        if request.exclude_provider_ids:
+            providers = [
+                provider
+                for provider in providers
+                if provider["provider_id"] not in request.exclude_provider_ids
+            ]
+            span.set_attribute(
+                "llm.excluded_provider_count",
+                len(request.exclude_provider_ids),
+            )
         provider_map = build_provider_map(providers)
         span.set_attribute("provider.source", source)
 
@@ -204,22 +280,27 @@ async def route(request: RouteRequest) -> dict[str, str]:
             )
 
         with cycle_lock:
-            candidates = provider_map[request.model]
-            current_index = round_robin_indices.get(request.model, 0)
-            provider = candidates[current_index % len(candidates)]
-            round_robin_indices[request.model] = (current_index + 1) % len(candidates)
+            provider, strategy = select_provider(
+                request.model,
+                provider_map[request.model],
+            )
 
         span.set_attribute("llm.selected_provider", provider["provider_id"])
-        span.set_attribute("llm.routing_strategy", "model_round_robin")
+        span.set_attribute("llm.routing_strategy", strategy)
+        if provider.get("last_latency_ms") is not None:
+            span.set_attribute("llm.selected_provider_latency_ms", float(provider["last_latency_ms"]))
         ROUTING_DECISIONS.labels(
             provider_id=provider["provider_id"],
             model=request.model,
-            strategy="model_round_robin",
+            strategy=strategy,
         ).inc()
 
         return {
             "provider_id": provider["provider_id"],
             "provider_name": provider["provider_name"],
             "provider_url": provider["base_url"],
-            "strategy": "model_round_robin",
+            "price_input_per_1k": provider.get("price_input_per_1k", 0.0),
+            "price_output_per_1k": provider.get("price_output_per_1k", 0.0),
+            "strategy": strategy,
+            "target_agent": selected_agent["agent_id"] if selected_agent else "",
         }

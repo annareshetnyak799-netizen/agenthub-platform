@@ -54,6 +54,8 @@ class ProviderRecord(BaseModel):
     enabled: bool = True
     health_status: str = "healthy"
     last_latency_ms: float | None = Field(default=None, ge=0.0)
+    failure_count: int = Field(default=0, ge=0)
+    cooldown_until: float | None = None
 
 
 class ProviderUpsertRequest(BaseModel):
@@ -67,6 +69,12 @@ class ProviderUpsertRequest(BaseModel):
     rate_limit: int | None = Field(default=None, ge=1)
     priority: int = 100
     enabled: bool = True
+
+
+class ProviderHealthReportRequest(BaseModel):
+    success: bool
+    latency_ms: float | None = Field(default=None, ge=0.0)
+    status_code: int | None = None
 
 
 provider_store: dict[str, ProviderRecord] = {}
@@ -115,6 +123,26 @@ def load_initial_providers() -> None:
     for item in raw:
         record = ProviderRecord(**item)
         provider_store[record.provider_id] = record
+
+
+def get_cooldown_seconds() -> int:
+    return max(int(os.getenv("PROVIDER_COOLDOWN_SECONDS", "30")), 1)
+
+
+def reconcile_provider(provider: ProviderRecord) -> ProviderRecord:
+    if (
+        provider.health_status == "unhealthy"
+        and provider.cooldown_until is not None
+        and provider.cooldown_until <= time.time()
+    ):
+        return provider.model_copy(
+            update={
+                "health_status": "healthy",
+                "cooldown_until": None,
+                "failure_count": 0,
+            }
+        )
+    return provider
 
 
 @app.on_event("startup")
@@ -186,6 +214,8 @@ async def list_providers(
             span.set_attribute("llm.model", model)
 
         with provider_lock:
+            for provider_id, provider in list(provider_store.items()):
+                provider_store[provider_id] = reconcile_provider(provider)
             providers = list(provider_store.values())
 
         if enabled_only:
@@ -202,6 +232,9 @@ async def list_providers(
 async def get_provider(provider_id: str) -> ProviderRecord:
     with provider_lock:
         provider = provider_store.get(provider_id)
+        if provider is not None:
+            provider = reconcile_provider(provider)
+            provider_store[provider_id] = provider
     if provider is None:
         REGISTRY_OPERATIONS.labels(operation="get", result="not_found").inc()
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
@@ -229,7 +262,60 @@ async def enable_provider(provider_id: str) -> ProviderRecord:
         if provider is None:
             REGISTRY_OPERATIONS.labels(operation="enable", result="not_found").inc()
             raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
-        updated = provider.model_copy(update={"enabled": True, "health_status": "healthy"})
+        updated = provider.model_copy(
+            update={
+                "enabled": True,
+                "health_status": "healthy",
+                "failure_count": 0,
+                "cooldown_until": None,
+            }
+        )
         provider_store[provider_id] = updated
     REGISTRY_OPERATIONS.labels(operation="enable", result="success").inc()
     return updated
+
+
+@app.post("/providers/{provider_id}/report-health", response_model=ProviderRecord)
+async def report_provider_health(
+    provider_id: str,
+    payload: ProviderHealthReportRequest,
+) -> ProviderRecord:
+    with tracer.start_as_current_span("provider_registry.report_health") as span:
+        span.set_attribute("provider.id", provider_id)
+        span.set_attribute("provider.success", payload.success)
+        if payload.status_code is not None:
+            span.set_attribute("http.status_code", payload.status_code)
+        if payload.latency_ms is not None:
+            span.set_attribute("provider.latency_ms", payload.latency_ms)
+
+        with provider_lock:
+            provider = provider_store.get(provider_id)
+            if provider is None:
+                REGISTRY_OPERATIONS.labels(operation="report_health", result="not_found").inc()
+                raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+
+            provider = reconcile_provider(provider)
+
+            if payload.success:
+                updated = provider.model_copy(
+                    update={
+                        "health_status": "healthy",
+                        "last_latency_ms": payload.latency_ms,
+                        "failure_count": 0,
+                        "cooldown_until": None,
+                    }
+                )
+            else:
+                updated = provider.model_copy(
+                    update={
+                        "health_status": "unhealthy",
+                        "last_latency_ms": payload.latency_ms,
+                        "failure_count": provider.failure_count + 1,
+                        "cooldown_until": time.time() + get_cooldown_seconds(),
+                    }
+                )
+
+            provider_store[provider_id] = updated
+
+        REGISTRY_OPERATIONS.labels(operation="report_health", result="success").inc()
+        return updated

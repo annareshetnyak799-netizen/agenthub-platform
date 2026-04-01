@@ -36,6 +36,7 @@ Repository scaffold initialized with a Level 1 development skeleton:
 
 - `api-gateway`
 - `router-service`
+- `agent-registry`
 - `provider-registry`
 - `mock-provider-openai`
 - `mock-provider-anthropic`
@@ -51,7 +52,8 @@ Monitoring endpoints after startup:
 
 - Gateway: `http://localhost:8000/metrics`
 - Router: `http://localhost:8005/metrics`
-- Provider Registry: `http://localhost:8002/metrics`
+- Agent Registry: `http://localhost:8007/metrics`
+- Provider Registry: `http://localhost:8006/metrics`
 - Mock OpenAI: `http://localhost:8101/metrics`
 - Mock Anthropic: `http://localhost:8102/metrics`
 - Prometheus: `http://localhost:9090`
@@ -76,3 +78,18 @@ The gateway asks the router to select a provider and then proxies the request to
 
 The first Level 2 service is `provider-registry`.
 It stores provider metadata in memory, supports runtime registration, and is now used by `router-service` as the primary source of active providers, with static config kept as a fallback path.
+
+The second Level 2 service is `agent-registry`.
+It stores Agent Cards in memory and allows `router-service` to validate `target_agent` values passed in generation requests.
+
+The current routing layer also supports a basic health-aware flow:
+- `api-gateway` reports provider success and failure back to `provider-registry`
+- unhealthy providers are temporarily excluded from routing during a cooldown window
+- mock providers expose `/admin/failure-mode` so failover can be demonstrated locally
+
+The gateway now also exposes Level 2 request telemetry for LLM traffic:
+- `agenthub_gateway_llm_ttft_seconds`
+- `agenthub_gateway_llm_tpot_seconds`
+- `agenthub_gateway_llm_tokens_total`
+- `agenthub_gateway_llm_cost_total`
+- `agenthub_gateway_llm_failovers_total`

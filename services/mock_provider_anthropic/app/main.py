@@ -13,6 +13,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from pydantic import BaseModel, Field
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 app = FastAPI(title="mock-provider-anthropic", version="0.1.0")
@@ -47,6 +48,15 @@ LLM_TOKENS = Counter(
     "Token counts emitted by a mock provider.",
     ["provider_id", "direction"],
 )
+failure_mode = {
+    "enabled": False,
+    "status_code": 503,
+}
+
+
+class FailureModeRequest(BaseModel):
+    enabled: bool
+    status_code: int = Field(default=503, ge=400, le=599)
 
 
 def setup_telemetry() -> None:
@@ -120,6 +130,13 @@ async def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.post("/admin/failure-mode")
+async def set_failure_mode(payload: FailureModeRequest) -> dict[str, Any]:
+    failure_mode["enabled"] = payload.enabled
+    failure_mode["status_code"] = payload.status_code
+    return {"provider_id": PROVIDER_ID, "failure_mode": failure_mode}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Any:
     payload = await request.json()
@@ -135,6 +152,12 @@ async def chat_completions(request: Request) -> Any:
         span.set_attribute("llm.simulated_latency_ms", BASE_LATENCY_MS)
 
         await asyncio.sleep(BASE_LATENCY_MS / 1000)
+        if failure_mode["enabled"]:
+            span.set_attribute("error", True)
+            return JSONResponse(
+                status_code=failure_mode["status_code"],
+                content={"detail": f"{PROVIDER_ID} forced failure mode enabled"},
+            )
         LLM_REQUESTS.labels(
             provider_id=PROVIDER_ID,
             model=model,

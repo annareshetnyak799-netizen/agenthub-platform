@@ -7,6 +7,7 @@ services:
       SERVICE_NAME: api-gateway
       LOG_LEVEL: INFO
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      PROVIDER_REGISTRY_URL: http://provider-registry:8002
       ROUTER_URL: http://router-service:8001
       GATEWAY_HOST: 0.0.0.0
       GATEWAY_PORT: 8000
@@ -28,6 +29,7 @@ services:
     environment:
       SERVICE_NAME: router-service
       LOG_LEVEL: INFO
+      AGENT_REGISTRY_URL: http://agent-registry:8003
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       PROVIDER_REGISTRY_URL: http://provider-registry:8002
       ROUTER_HOST: 0.0.0.0
@@ -52,6 +54,7 @@ services:
     ports:
       - "8005:8001"
     depends_on:
+      - agent-registry
       - provider-registry
       - mock-provider-openai
       - mock-provider-anthropic
@@ -111,6 +114,7 @@ services:
     environment:
       SERVICE_NAME: provider-registry
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      PROVIDER_COOLDOWN_SECONDS: 30
       INITIAL_PROVIDERS: >
         [
           {
@@ -148,6 +152,44 @@ services:
       timeout: 3s
       retries: 5
 
+  agent-registry:
+    build:
+      context: ./services/agent_registry
+    container_name: agent-registry
+    environment:
+      SERVICE_NAME: agent-registry
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      INITIAL_AGENTS: >
+        [
+          {
+            "agent_id": "summarizer-agent",
+            "name": "Summarizer Agent",
+            "description": "Summarizes text and incident context.",
+            "supported_methods": ["summarize_text", "summarize_incident"],
+            "endpoint_url": "http://mock-agent-summarizer:8201",
+            "status": "active",
+            "auth_required": false
+          },
+          {
+            "agent_id": "classifier-agent",
+            "name": "Classifier Agent",
+            "description": "Classifies text topics and priorities.",
+            "supported_methods": ["classify_topic", "classify_priority"],
+            "endpoint_url": "http://mock-agent-classifier:8202",
+            "status": "active",
+            "auth_required": false
+          }
+        ]
+    ports:
+      - "8007:8003"
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8003/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: prometheus
@@ -160,6 +202,7 @@ services:
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on:
+      - agent-registry
       - api-gateway
       - provider-registry
       - router-service
