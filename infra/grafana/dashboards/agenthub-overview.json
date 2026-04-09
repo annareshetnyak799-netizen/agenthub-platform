@@ -40,7 +40,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (service) (rate(agenthub_http_requests_total{path=\"/v1/chat/completions\"}[1m]))",
+          "expr": "sum by (service) (rate(agenthub_http_requests_total[1m]))",
           "legendFormat": "{{service}}",
           "refId": "A"
         }
@@ -80,12 +80,17 @@
       },
       "targets": [
         {
+          "expr": "histogram_quantile(0.50, sum by (le, service) (rate(agenthub_http_request_duration_seconds_bucket{path=\"/v1/chat/completions\"}[5m])))",
+          "legendFormat": "{{service}} p50",
+          "refId": "A"
+        },
+        {
           "expr": "histogram_quantile(0.95, sum by (le, service) (rate(agenthub_http_request_duration_seconds_bucket{path=\"/v1/chat/completions\"}[5m])))",
           "legendFormat": "{{service}} p95",
-          "refId": "A"
+          "refId": "B"
         }
       ],
-      "title": "p95 Latency by Service",
+      "title": "Chat Completion Latency p50/p95",
       "type": "timeseries"
     },
     {
@@ -165,12 +170,174 @@
       ],
       "title": "Response Codes by Service",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job) (rate(process_cpu_seconds_total{job=~\"api-gateway|router-service|provider-registry|agent-registry|mock-provider-openai|mock-provider-anthropic|mock-agent-summarizer|mock-agent-classifier\"}[5m]))",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "title": "CPU Usage by Service",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider_id, stream) (rate(agenthub_gateway_llm_ttft_seconds_sum[5m])) / sum by (provider_id, stream) (rate(agenthub_gateway_llm_ttft_seconds_count[5m]))",
+          "legendFormat": "{{provider_id}} stream={{stream}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Average TTFT by Provider",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider_id) (rate(agenthub_gateway_llm_tpot_seconds_sum[5m])) / sum by (provider_id) (rate(agenthub_gateway_llm_tpot_seconds_count[5m]))",
+          "legendFormat": "{{provider_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Average TPOT by Provider",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider_id) (rate(agenthub_gateway_llm_cost_total[5m]))",
+          "legendFormat": "{{provider_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Estimated Cost Rate by Provider",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
   "schemaVersion": 39,
   "style": "dark",
-  "tags": ["agenthub"],
+  "tags": [
+    "agenthub"
+  ],
   "templating": {
     "list": []
   },
@@ -181,6 +348,6 @@
   "timezone": "browser",
   "title": "AgentHub Overview",
   "uid": "agenthub-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

@@ -30,6 +30,15 @@ infra/      Observability and local infrastructure configs
 tests/      Integration, load, and failure scenario tests
 ```
 
+Key documentation:
+
+- `docs/ARCHITECTURE.md`
+- `docs/API.md`
+- `docs/RUNBOOK.md`
+- `docs/TESTING.md`
+- `docs/STRATEGY_COMPARISON.md`
+- `docs/EVIDENCE.md`
+
 ## Status
 
 Repository scaffold initialized with a Level 1 development skeleton:
@@ -40,6 +49,8 @@ Repository scaffold initialized with a Level 1 development skeleton:
 - `provider-registry`
 - `mock-provider-openai`
 - `mock-provider-anthropic`
+- `mock-agent-summarizer`
+- `mock-agent-classifier`
 - `docker-compose.yml`
 
 ## Quick Start
@@ -56,6 +67,8 @@ Monitoring endpoints after startup:
 - Provider Registry: `http://localhost:8006/metrics`
 - Mock OpenAI: `http://localhost:8101/metrics`
 - Mock Anthropic: `http://localhost:8102/metrics`
+- Mock Agent Summarizer: `http://localhost:8201/metrics`
+- Mock Agent Classifier: `http://localhost:8202/metrics`
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000` with `admin/admin`
 - Jaeger: `http://localhost:16686`
@@ -74,6 +87,16 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 ```
 
 The gateway asks the router to select a provider and then proxies the request to the selected mock provider.
+
+Example agent request:
+
+```bash
+curl -X POST http://localhost:8000/v1/agents/summarizer-agent/summarize_text \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Service latency increased after the morning deploy. Rolling restart restored normal behavior."
+  }'
+```
 
 ## Level 2 In Progress
 
@@ -95,5 +118,8 @@ The gateway now also exposes Level 2 request telemetry for LLM traffic:
 - `agenthub_gateway_llm_cost_total`
 - `agenthub_gateway_llm_failovers_total`
 
+Basic CPU visibility is also available through `process_cpu_seconds_total`, which is scraped by Prometheus and displayed in Grafana.
+
 MLflow is also wired in as a request-level tracking UI.
-Each gateway request is logged as a run with provider, model, routing strategy, tokens, latency, TTFT, TPOT, cost, and failover metadata.
+Each LLM request is logged as a run with provider, model, routing strategy, tokens, latency, TTFT, TPOT, cost, and failover metadata.
+Each agent invocation is also logged as a run with agent id, method, latency, and status metadata.

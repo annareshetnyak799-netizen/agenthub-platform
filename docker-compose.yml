@@ -7,6 +7,7 @@ services:
       SERVICE_NAME: api-gateway
       LOG_LEVEL: INFO
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      AGENT_REGISTRY_URL: http://agent-registry:8003
       PROVIDER_REGISTRY_URL: http://provider-registry:8002
       ROUTER_URL: http://router-service:8001
       GATEWAY_HOST: 0.0.0.0
@@ -17,7 +18,10 @@ services:
     ports:
       - "8000:8000"
     depends_on:
+      - agent-registry
       - mlflow
+      - mock-agent-summarizer
+      - mock-agent-classifier
       - router-service
       - otel-collector
     healthcheck:
@@ -194,6 +198,42 @@ services:
       timeout: 3s
       retries: 5
 
+  mock-agent-summarizer:
+    build:
+      context: ./services/mock_agent_summarizer
+    container_name: mock-agent-summarizer
+    environment:
+      SERVICE_NAME: mock-agent-summarizer
+      AGENT_ID: summarizer-agent
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8201:8201"
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8201/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  mock-agent-classifier:
+    build:
+      context: ./services/mock_agent_classifier
+    container_name: mock-agent-classifier
+    environment:
+      SERVICE_NAME: mock-agent-classifier
+      AGENT_ID: classifier-agent
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8202:8202"
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8202/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: prometheus
@@ -210,6 +250,8 @@ services:
       - api-gateway
       - provider-registry
       - router-service
+      - mock-agent-summarizer
+      - mock-agent-classifier
       - mock-provider-openai
       - mock-provider-anthropic
 

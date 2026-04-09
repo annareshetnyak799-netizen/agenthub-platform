@@ -32,3 +32,13 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["mock-provider-anthropic:8102"]
+
+  - job_name: mock-agent-summarizer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["mock-agent-summarizer:8201"]
+
+  - job_name: mock-agent-classifier
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["mock-agent-classifier:8202"]

@@ -21,6 +21,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 app = FastAPI(title="api-gateway", version="0.1.0")
 
 ROUTER_URL = os.getenv("ROUTER_URL", "http://router-service:8001")
+AGENT_REGISTRY_URL = os.getenv(
+    "AGENT_REGISTRY_URL",
+    "http://agent-registry:8003",
+)
 PROVIDER_REGISTRY_URL = os.getenv(
     "PROVIDER_REGISTRY_URL",
     "http://provider-registry:8002",
@@ -56,6 +60,11 @@ UPSTREAM_ERRORS = Counter(
     "agenthub_gateway_upstream_errors_total",
     "Errors returned by router or upstream providers.",
     ["upstream", "status_code"],
+)
+AGENT_INVOCATIONS = Counter(
+    "agenthub_gateway_agent_invocations_total",
+    "Agent invocations proxied by the gateway.",
+    ["agent_id", "method", "status_code"],
 )
 LLM_TTFT = Histogram(
     "agenthub_gateway_llm_ttft_seconds",
@@ -112,6 +121,8 @@ def normalize_path(path: str) -> str:
         return "/metrics"
     if path.startswith("/health"):
         return "/health"
+    if path.startswith("/v1/agents/"):
+        return "/v1/agents/{agent_id}/{method}"
     if path.startswith("/v1/chat/completions"):
         return "/v1/chat/completions"
     return path
@@ -430,6 +441,20 @@ async def request_route(
     return route_response.json()
 
 
+async def get_agent_card(agent_id: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as client:
+        response = await client.get(f"{AGENT_REGISTRY_URL}/agents/{agent_id}")
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    if response.status_code >= 400:
+        UPSTREAM_ERRORS.labels(
+            upstream="agent-registry",
+            status_code=str(response.status_code),
+        ).inc()
+        raise HTTPException(status_code=503, detail="Agent registry unavailable")
+    return response.json()
+
+
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     method = request.method
@@ -464,6 +489,74 @@ async def health() -> dict[str, str]:
 @app.get("/metrics")
 async def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.post("/v1/agents/{agent_id}/{method_name}")
+async def invoke_agent(agent_id: str, method_name: str, request: Request) -> Response:
+    payload = await request.json()
+    request_started = time.perf_counter()
+
+    with tracer.start_as_current_span("gateway.invoke_agent") as span:
+        span.set_attribute("agent.id", agent_id)
+        span.set_attribute("agent.method", method_name)
+
+        agent_card = await get_agent_card(agent_id)
+        if agent_card.get("status") != "active":
+            raise HTTPException(
+                status_code=503,
+                detail=f"Agent '{agent_id}' is not active",
+            )
+        if method_name not in agent_card.get("supported_methods", []):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Method '{method_name}' is not supported by agent '{agent_id}'",
+            )
+
+        target_url = f"{agent_card['endpoint_url'].rstrip('/')}/{method_name}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            agent_response = await client.post(target_url, json=payload)
+
+        AGENT_INVOCATIONS.labels(
+            agent_id=agent_id,
+            method=method_name,
+            status_code=str(agent_response.status_code),
+        ).inc()
+        span.set_attribute("http.status_code", agent_response.status_code)
+
+        if agent_response.status_code >= 400:
+            UPSTREAM_ERRORS.labels(
+                upstream=agent_id,
+                status_code=str(agent_response.status_code),
+            ).inc()
+            raise HTTPException(
+                status_code=agent_response.status_code,
+                detail=agent_response.text,
+            )
+
+        await log_request_to_mlflow(
+            route={
+                "provider_id": agent_id,
+                "provider_name": agent_card.get("name", agent_id),
+                "strategy": "agent_registry_lookup",
+                "target_agent": agent_id,
+            },
+            model=f"agent:{method_name}",
+            stream_flag=False,
+            prompt_tokens=0,
+            completion_tokens=0,
+            ttft_seconds=None,
+            tpot_seconds=None,
+            cost=0.0,
+            failover=False,
+            total_latency_seconds=time.perf_counter() - request_started,
+            status_code=agent_response.status_code,
+        )
+
+        return JSONResponse(
+            content=json.loads(agent_response.text),
+            status_code=agent_response.status_code,
+            media_type=agent_response.headers.get("content-type", "application/json"),
+        )
 
 
 @app.post("/v1/chat/completions")
