@@ -13,8 +13,9 @@ docs/evidence/
 Recommended naming:
 
 - `grafana-latency-traffic.png`
-- `grafana-cpu.png`
+- `grafana-cpu-llm-telemetry.png`
 - `jaeger-llm-trace.png`
+- `jaeger-agent-trace.png`
 - `mlflow-llm-run.png`
 - `mlflow-agent-run.png`
 
@@ -27,6 +28,7 @@ Recommended naming:
   - provider traffic distribution
 - Grafana screenshot with:
   - CPU usage by service
+  - optional TTFT / TPOT / cost panels visible
 - Jaeger screenshot with:
   - gateway -> router -> provider trace
 
@@ -34,7 +36,7 @@ Recommended naming:
 
 - MLflow screenshot with an LLM run
 - MLflow screenshot with an agent run
-- Optional Jaeger screenshot with:
+- Jaeger screenshot with:
   - gateway -> agent-registry -> mock-agent trace
 
 ## Terminal Evidence

@@ -35,29 +35,28 @@ AgentHub is an infrastructure-first agent platform that:
 Client ---------------->    api-gateway    |
                        +---------+---------+
                                  |
-                                 | /route
-                                 v
-                       +---------+---------+
-                       |   router-service  |
-                       +----+---------+----+
-                            |         |
-               /providers   |         | /agents/{id}
-                            v         v
-                  +---------+--+   +--+----------+
-                  |provider-   |   |agent-       |
-                  |registry    |   |registry     |
-                  +------+-----+   +------+------+
-                         |                |
-         +---------------+                +----------------+
-         |                                                |
-         v                                                v
-+--------+------------+                       +-----------+-----------+
-| mock-provider-openai|                       | mock-agent-summarizer |
-+---------------------+                       +-----------------------+
-+---------------------+                       +-----------------------+
-| mock-provider-      |                       | mock-agent-classifier |
-| anthropic           |                       +-----------------------+
-+---------------------+
+                     +-----------+-----------+
+                     |                       |
+                     | /route                | /v1/agents/{id}/{method}
+                     v                       v
+             +-------+--------+      +------+------+
+             | router-service |      | agent-      |
+             +----+------+----+      | registry    |
+                  |      |           +------+------+
+      /providers  |      | /agents/{id}           |
+                  v      v                         |
+          +-------+------+                         |
+          | provider-    |                         |
+          | registry     |                         |
+          +------+-------+                         |
+                 |                                 |
+       +---------+----------+             +--------+---------------+
+       |                    |             |                        |
+       v                    v             v                        v
++------+-------------+  +---+------------+  +--------------------+  +--------------------+
+| mock-provider-     |  | mock-provider- |  | mock-agent-        |  | mock-agent-        |
+| openai             |  | anthropic      |  | summarizer         |  | classifier         |
++--------------------+  +----------------+  +--------------------+  +--------------------+
 ```
 
 ## LLM Request Flow

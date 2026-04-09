@@ -27,7 +27,7 @@ The project is designed as a staged implementation:
 docs/       Architecture, API, deployment, and testing notes
 services/   Application services and mock components
 infra/      Observability and local infrastructure configs
-tests/      Integration, load, and failure scenario tests
+tests/      Automated integration tests for core Level 1/2 flows
 ```
 
 Key documentation:
@@ -41,7 +41,7 @@ Key documentation:
 
 ## Status
 
-Repository scaffold initialized with a Level 1 development skeleton:
+The repository currently delivers a complete Level 1 and Level 2 local platform package:
 
 - `api-gateway`
 - `router-service`
@@ -53,10 +53,39 @@ Repository scaffold initialized with a Level 1 development skeleton:
 - `mock-agent-classifier`
 - `docker-compose.yml`
 
+Implemented Level 1 capabilities:
+
+- Docker Compose deployment for all components
+- multiple mock LLM providers
+- model-based routing with round robin fallback
+- streaming passthrough
+- health endpoints
+- Prometheus, Grafana, OpenTelemetry, and Jaeger monitoring
+
+Implemented Level 2 capabilities:
+
+- dynamic provider registration
+- A2A agent registry with Agent Cards
+- runnable mock agent services
+- health-aware routing with cooldown-based ejection
+- latency-aware routing after warm-up
+- TTFT, TPOT, token, and cost telemetry
+- MLflow request tracking for both LLM and agent execution
+- automated black-box integration tests for core Level 1/2 flows
+
 ## Quick Start
 
 ```bash
 docker compose up --build
+```
+
+Run the automated integration suite against the live local stack:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r tests/requirements.txt
+pytest tests -v
 ```
 
 Monitoring endpoints after startup:
@@ -98,7 +127,7 @@ curl -X POST http://localhost:8000/v1/agents/summarizer-agent/summarize_text \
   }'
 ```
 
-## Level 2 In Progress
+## Level 2 Delivery Notes
 
 The first Level 2 service is `provider-registry`.
 It stores provider metadata in memory, supports runtime registration, and is now used by `router-service` as the primary source of active providers, with static config kept as a fallback path.

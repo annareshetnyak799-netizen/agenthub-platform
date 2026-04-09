@@ -9,6 +9,7 @@ This project is validated through reproducible functional scenarios covering:
 - Level 2 agent and provider registries
 - Level 2 health-aware and latency-aware routing
 - Level 2 MLflow request tracking
+- automated black-box integration coverage for core HTTP flows
 
 ## Test Matrix
 
@@ -64,7 +65,8 @@ Recommended evidence to keep for submission:
 
 - 1 screenshot of Grafana with latency and provider traffic panels
 - 1 screenshot of Grafana with CPU panel visible
-- 1 screenshot of Jaeger trace
+- 1 screenshot of Jaeger gateway -> router -> provider trace
+- 1 screenshot of Jaeger gateway -> agent-registry -> mock-agent trace
 - 1 short terminal excerpt proving `/health` and `/metrics` availability
 
 Recommended storage location:
@@ -107,6 +109,18 @@ Recommended storage location:
 - `docs/evidence/`
 
 ## Manual Validation Steps
+
+The repository now includes a lightweight automated integration suite in `tests/`.
+These tests are intended to run against an already-started local `docker compose` stack and cover the main HTTP acceptance flows for Levels 1 and 2.
+
+Run them with:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r tests/requirements.txt
+pytest tests -v
+```
 
 ### 1. Base LLM request
 
@@ -223,5 +237,5 @@ Expected:
 
 ## Remaining Manual Checks
 
-The repo currently relies on documented manual and UI-assisted validation rather than a full automated integration test suite.
-This is acceptable for the current course milestone, but Level 3 should add scripted load and resilience tests.
+The repo now contains a small automated integration suite for the core request flows, but UI evidence and observability review still remain partly manual.
+That is acceptable for the current course milestone. Level 3 should add scripted load, resilience, and failure-injection test runs.

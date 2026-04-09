@@ -6,6 +6,17 @@
 docker compose up --build
 ```
 
+## Automated Test Suite
+
+Install the lightweight test dependencies and run the black-box integration suite against the live stack:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r tests/requirements.txt
+pytest tests -v
+```
+
 ## Main UIs
 
 - Gateway docs: `http://localhost:8000/docs`
