@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+docs/DEFENSE.md
 venv/
 
 # Environment files
@@ -34,4 +35,3 @@ build/
 prometheus_data/
 grafana_data/
 mlruns/
-

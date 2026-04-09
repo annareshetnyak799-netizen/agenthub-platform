@@ -9,6 +9,8 @@ AgentHub is an infrastructure-first agent platform that:
 - routes LLM requests using model-aware, latency-aware, and health-aware strategies
 - proxies streaming responses without breaking the client connection
 - collects metrics, traces, and request-level execution records
+- blocks unsafe requests through a lightweight guardrail layer in the gateway
+- protects public and administrative operations with bearer-token authorization
 
 ## System Components
 
@@ -27,6 +29,12 @@ AgentHub is an infrastructure-first agent platform that:
 | `prometheus` | Metrics scraping and query engine |
 | `grafana` | Monitoring dashboards |
 | `mlflow` | Request-level execution tracking UI for LLM and agent runs |
+
+Current persistence model:
+
+- `agent-registry` and `provider-registry` intentionally keep state in memory for a deterministic, easy-to-run course prototype
+- this keeps the local stack simple while the main focus remains routing, failover, observability, guardrails, and authorization
+- a production-grade next step would be adding persistent storage such as PostgreSQL for control-plane data
 
 ## Runtime Topology
 
@@ -146,6 +154,35 @@ Detailed flow:
 5. Gateway returns the JSON response to the client.
 6. Gateway logs the invocation to MLflow and traces it through OpenTelemetry.
 
+## Guardrail Flow
+
+Guardrails are enforced in `api-gateway` before routing or agent lookup.
+
+```text
+Client -> api-gateway -> guardrail evaluation
+                       -> blocked request returns 400
+                       -> allowed request continues to router or agent-registry
+```
+
+Current guardrail categories:
+
+- prompt injection patterns
+- secret leakage patterns
+- basic secret exfiltration patterns
+
+## Authorization Flow
+
+The platform uses bearer tokens for public and administrative operations.
+
+Current token split:
+
+- client token for `api-gateway` request entrypoints
+- admin token for:
+  - provider registry mutation endpoints
+  - agent registry registration endpoint
+  - mock provider admin failure mode
+  - gateway to provider-registry health reporting
+
 ## Routing Strategies
 
 ### Model-based routing
@@ -194,6 +231,7 @@ Key dashboard categories:
 - CPU usage by service
 - TTFT / TPOT
 - token and cost telemetry
+- guardrail block counters
 
 CPU is tracked via `process_cpu_seconds_total`, which is emitted by the Python Prometheus client in each service process and scraped by Prometheus.
 

@@ -1,6 +1,6 @@
 import requests
 
-from tests.helpers import DEFAULT_TIMEOUT, GATEWAY_URL
+from tests.helpers import DEFAULT_TIMEOUT, GATEWAY_URL, gateway_headers
 
 
 def test_agent_invocation_is_proxied_through_gateway() -> None:
@@ -8,6 +8,7 @@ def test_agent_invocation_is_proxied_through_gateway() -> None:
     response = requests.post(
         f"{GATEWAY_URL}/v1/agents/classifier-agent/classify_priority",
         json=payload,
+        headers=gateway_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
 
@@ -22,6 +23,7 @@ def test_missing_agent_returns_404() -> None:
     response = requests.post(
         f"{GATEWAY_URL}/v1/agents/missing-agent/classify_priority",
         json={"text": "Anything"},
+        headers=gateway_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
 

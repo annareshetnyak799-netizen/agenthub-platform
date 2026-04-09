@@ -12,6 +12,8 @@ services:
       ROUTER_URL: http://router-service:8001
       GATEWAY_HOST: 0.0.0.0
       GATEWAY_PORT: 8000
+      PLATFORM_API_TOKEN: agenthub-client-token
+      ADMIN_API_TOKEN: agenthub-admin-token
       MLFLOW_ENABLED: "true"
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_EXPERIMENT_NAME: agenthub-gateway-requests
@@ -84,6 +86,7 @@ services:
       PROVIDER_PORT: 8101
       DEFAULT_MODEL: gpt-4o-mini
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      ADMIN_API_TOKEN: agenthub-admin-token
       STREAM_DELAY_SECONDS: 0.15
       BASE_LATENCY_MS: 250
     ports:
@@ -105,6 +108,7 @@ services:
       PROVIDER_PORT: 8102
       DEFAULT_MODEL: claude-3-haiku
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      ADMIN_API_TOKEN: agenthub-admin-token
       STREAM_DELAY_SECONDS: 0.25
       BASE_LATENCY_MS: 400
     ports:
@@ -122,6 +126,7 @@ services:
     environment:
       SERVICE_NAME: provider-registry
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      ADMIN_API_TOKEN: agenthub-admin-token
       PROVIDER_COOLDOWN_SECONDS: 30
       INITIAL_PROVIDERS: >
         [
@@ -167,6 +172,7 @@ services:
     environment:
       SERVICE_NAME: agent-registry
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      ADMIN_API_TOKEN: agenthub-admin-token
       INITIAL_AGENTS: >
         [
           {
@@ -233,6 +239,24 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  k6:
+    image: grafana/k6:latest
+    profiles:
+      - loadtest
+    working_dir: /scripts
+    environment:
+      BASE_URL: http://api-gateway:8000
+      MOCK_OPENAI_ADMIN_URL: http://mock-provider-openai:8101
+      PROVIDER_REGISTRY_URL: http://provider-registry:8002
+      PLATFORM_API_TOKEN: agenthub-client-token
+      ADMIN_API_TOKEN: agenthub-admin-token
+    volumes:
+      - ./tests/load:/scripts:ro
+    depends_on:
+      - api-gateway
+      - mock-provider-openai
+      - provider-registry
 
   prometheus:
     image: prom/prometheus:v2.54.1

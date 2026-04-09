@@ -14,6 +14,8 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from pydantic import BaseModel, HttpUrl
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
+from .auth import require_bearer_token
+
 app = FastAPI(title="agent-registry", version="0.1.0")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "agent-registry")
@@ -22,6 +24,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
     "http://otel-collector:4317",
 )
 INITIAL_AGENTS = os.getenv("INITIAL_AGENTS", "[]")
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "agenthub-admin-token")
 
 REQUEST_COUNT = Counter(
     "agenthub_http_requests_total",
@@ -146,7 +149,8 @@ async def metrics() -> Response:
 
 
 @app.post("/agents/register", response_model=AgentCard, status_code=201)
-async def register_agent(payload: AgentRegisterRequest) -> AgentCard:
+async def register_agent(payload: AgentRegisterRequest, request: Request) -> AgentCard:
+    require_bearer_token(request, ADMIN_API_TOKEN, "agent-registry")
     with tracer.start_as_current_span("agent_registry.register") as span:
         span.set_attribute("agent.id", payload.agent_id)
         existed = payload.agent_id in agent_store

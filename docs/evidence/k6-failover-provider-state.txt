@@ -1,0 +1,1 @@
+{"provider_id":"mock-openai","provider_name":"mock-openai","base_url":"http://mock-provider-openai:8101","supported_models":["gpt-4o-mini","shared-demo-model"],"weight":1,"price_input_per_1k":0.15,"price_output_per_1k":0.6,"rate_limit":null,"priority":100,"enabled":true,"health_status":"healthy","last_latency_ms":450.6629999996221,"failure_count":0,"cooldown_until":null}

@@ -16,6 +16,8 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from pydantic import BaseModel, Field
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
+from .auth import require_bearer_token
+
 app = FastAPI(title="mock-provider-openai", version="0.1.0")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "mock-provider-openai")
@@ -28,6 +30,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "http://otel-collector:4317",
 )
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "agenthub-admin-token")
 REQUEST_COUNT = Counter(
     "agenthub_http_requests_total",
     "Total HTTP requests handled by a service.",
@@ -131,7 +134,8 @@ async def metrics() -> Response:
 
 
 @app.post("/admin/failure-mode")
-async def set_failure_mode(payload: FailureModeRequest) -> dict[str, Any]:
+async def set_failure_mode(payload: FailureModeRequest, request: Request) -> dict[str, Any]:
+    require_bearer_token(request, ADMIN_API_TOKEN, "mock-provider-admin")
     failure_mode["enabled"] = payload.enabled
     failure_mode["status_code"] = payload.status_code
     return {"provider_id": PROVIDER_ID, "failure_mode": failure_mode}

@@ -1,12 +1,13 @@
 import requests
 
-from tests.helpers import DEFAULT_TIMEOUT, GATEWAY_URL
+from tests.helpers import DEFAULT_TIMEOUT, GATEWAY_URL, gateway_headers
 
 
 def test_non_stream_chat_completion_returns_provider_response(shared_demo_payload: dict) -> None:
     response = requests.post(
         f"{GATEWAY_URL}/v1/chat/completions",
         json=shared_demo_payload,
+        headers=gateway_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
 
@@ -30,6 +31,7 @@ def test_streaming_chat_completion_emits_sse_chunks() -> None:
     with requests.post(
         f"{GATEWAY_URL}/v1/chat/completions",
         json=payload,
+        headers=gateway_headers(),
         timeout=DEFAULT_TIMEOUT,
         stream=True,
     ) as response:

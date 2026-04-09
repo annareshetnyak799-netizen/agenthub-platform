@@ -15,6 +15,8 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from pydantic import BaseModel, Field
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
+from .auth import require_bearer_token
+
 app = FastAPI(title="provider-registry", version="0.1.0")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "provider-registry")
@@ -23,6 +25,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
     "http://otel-collector:4317",
 )
 INITIAL_PROVIDERS = os.getenv("INITIAL_PROVIDERS", "[]")
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "agenthub-admin-token")
 
 REQUEST_COUNT = Counter(
     "agenthub_http_requests_total",
@@ -187,7 +190,8 @@ async def metrics() -> Response:
 
 
 @app.post("/providers/register", response_model=ProviderRecord, status_code=201)
-async def register_provider(payload: ProviderUpsertRequest) -> ProviderRecord:
+async def register_provider(payload: ProviderUpsertRequest, request: Request) -> ProviderRecord:
+    require_bearer_token(request, ADMIN_API_TOKEN, "provider-registry")
     with tracer.start_as_current_span("provider_registry.register") as span:
         span.set_attribute("provider.id", payload.provider_id)
         existed = payload.provider_id in provider_store
@@ -243,7 +247,8 @@ async def get_provider(provider_id: str) -> ProviderRecord:
 
 
 @app.post("/providers/{provider_id}/disable", response_model=ProviderRecord)
-async def disable_provider(provider_id: str) -> ProviderRecord:
+async def disable_provider(provider_id: str, request: Request) -> ProviderRecord:
+    require_bearer_token(request, ADMIN_API_TOKEN, "provider-registry")
     with provider_lock:
         provider = provider_store.get(provider_id)
         if provider is None:
@@ -256,7 +261,8 @@ async def disable_provider(provider_id: str) -> ProviderRecord:
 
 
 @app.post("/providers/{provider_id}/enable", response_model=ProviderRecord)
-async def enable_provider(provider_id: str) -> ProviderRecord:
+async def enable_provider(provider_id: str, request: Request) -> ProviderRecord:
+    require_bearer_token(request, ADMIN_API_TOKEN, "provider-registry")
     with provider_lock:
         provider = provider_store.get(provider_id)
         if provider is None:
@@ -279,7 +285,9 @@ async def enable_provider(provider_id: str) -> ProviderRecord:
 async def report_provider_health(
     provider_id: str,
     payload: ProviderHealthReportRequest,
+    request: Request,
 ) -> ProviderRecord:
+    require_bearer_token(request, ADMIN_API_TOKEN, "provider-registry")
     with tracer.start_as_current_span("provider_registry.report_health") as span:
         span.set_attribute("provider.id", provider_id)
         span.set_attribute("provider.success", payload.success)

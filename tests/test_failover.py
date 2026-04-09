@@ -3,10 +3,12 @@ import time
 import requests
 
 from tests.helpers import (
+    admin_headers,
     DEFAULT_TIMEOUT,
     GATEWAY_URL,
     MOCK_OPENAI_URL,
     PROVIDER_REGISTRY_URL,
+    gateway_headers,
 )
 
 
@@ -16,6 +18,7 @@ def test_health_aware_failover_ejects_failing_provider(
     enable_failure_response = requests.post(
         f"{MOCK_OPENAI_URL}/admin/failure-mode",
         json={"enabled": True, "status_code": 503},
+        headers=admin_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
     assert enable_failure_response.status_code == 200
@@ -32,6 +35,7 @@ def test_health_aware_failover_ejects_failing_provider(
         last_response = requests.post(
             f"{GATEWAY_URL}/v1/chat/completions",
             json=route_payload,
+            headers=gateway_headers(),
             timeout=DEFAULT_TIMEOUT,
         )
         assert last_response.status_code == 200
@@ -54,6 +58,7 @@ def test_health_aware_failover_ejects_failing_provider(
     followup_response = requests.post(
         f"{GATEWAY_URL}/v1/chat/completions",
         json=route_payload,
+        headers=gateway_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
     assert followup_response.status_code == 200

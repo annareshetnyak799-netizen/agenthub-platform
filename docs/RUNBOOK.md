@@ -17,6 +17,26 @@ python -m pip install -r tests/requirements.txt
 pytest tests -v
 ```
 
+## Load Test Pack
+
+Load and failover scenarios are provided in:
+
+- `tests/load/k6_chat.js`
+- `tests/load/k6_stream.js`
+- `tests/load/k6_failover.js`
+
+See:
+
+- `docs/LOAD_TESTING.md`
+
+Quick commands:
+
+```bash
+docker compose run --rm k6 run /scripts/k6_chat.js
+docker compose run --rm k6 run /scripts/k6_stream.js
+docker compose run --rm k6 run /scripts/k6_failover.js
+```
+
 ## Main UIs
 
 - Gateway docs: `http://localhost:8000/docs`
@@ -34,6 +54,7 @@ pytest tests -v
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer agenthub-client-token" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "shared-demo-model",
@@ -46,6 +67,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ```bash
 curl -N -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer agenthub-client-token" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "shared-demo-model",
@@ -58,6 +80,7 @@ curl -N -X POST http://localhost:8000/v1/chat/completions \
 
 ```bash
 curl -X POST http://localhost:8000/v1/agents/summarizer-agent/summarize_text \
+  -H "Authorization: Bearer agenthub-client-token" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Service latency increased after the morning deploy. Rolling restart restored normal behavior."
@@ -70,6 +93,7 @@ Enable failure mode on `mock-openai`:
 
 ```bash
 curl -X POST http://localhost:8101/admin/failure-mode \
+  -H "Authorization: Bearer agenthub-admin-token" \
   -H "Content-Type: application/json" \
   -d '{"enabled": true, "status_code": 503}'
 ```
@@ -85,6 +109,7 @@ Disable failure mode:
 
 ```bash
 curl -X POST http://localhost:8101/admin/failure-mode \
+  -H "Authorization: Bearer agenthub-admin-token" \
   -H "Content-Type: application/json" \
   -d '{"enabled": false, "status_code": 503}'
 ```

@@ -2,6 +2,8 @@
 
 AgentHub Platform is an infrastructure-first agent platform for registering A2A agents, connecting multiple LLM providers, routing requests intelligently, and collecting end-to-end telemetry.
 
+The current prototype intentionally keeps registry state in memory to preserve a simple and deterministic local stack; persistent storage would be the next step for a production-grade control plane.
+
 The project is designed as a staged implementation:
 
 - Level 1: multi-provider LLM routing, streaming proxy, monitoring
@@ -28,6 +30,7 @@ docs/       Architecture, API, deployment, and testing notes
 services/   Application services and mock components
 infra/      Observability and local infrastructure configs
 tests/      Automated integration tests for core Level 1/2 flows
+            and Level 3 load scenarios
 ```
 
 Key documentation:
@@ -38,10 +41,11 @@ Key documentation:
 - `docs/TESTING.md`
 - `docs/STRATEGY_COMPARISON.md`
 - `docs/EVIDENCE.md`
+- `docs/LOAD_TESTING.md`
 
 ## Status
 
-The repository currently delivers a complete Level 1 and Level 2 local platform package:
+The repository currently delivers a complete local platform package across Levels 1, 2, and 3:
 
 - `api-gateway`
 - `router-service`
@@ -72,6 +76,12 @@ Implemented Level 2 capabilities:
 - TTFT, TPOT, token, and cost telemetry
 - MLflow request tracking for both LLM and agent execution
 - automated black-box integration tests for core Level 1/2 flows
+
+Implemented Level 3 capabilities:
+
+- gateway guardrails for prompt injection, secret leakage, and basic exfiltration patterns
+- bearer-token authorization for gateway, registry mutation endpoints, and provider admin operations
+- reproducible k6 load and failure test scenarios through Docker Compose networking
 
 ## Quick Start
 
@@ -107,6 +117,7 @@ Example request:
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer agenthub-client-token" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "shared-demo-model",
@@ -121,6 +132,7 @@ Example agent request:
 
 ```bash
 curl -X POST http://localhost:8000/v1/agents/summarizer-agent/summarize_text \
+  -H "Authorization: Bearer agenthub-client-token" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Service latency increased after the morning deploy. Rolling restart restored normal behavior."
@@ -152,3 +164,11 @@ Basic CPU visibility is also available through `process_cpu_seconds_total`, whic
 MLflow is also wired in as a request-level tracking UI.
 Each LLM request is logged as a run with provider, model, routing strategy, tokens, latency, TTFT, TPOT, cost, and failover metadata.
 Each agent invocation is also logged as a run with agent id, method, latency, and status metadata.
+
+The gateway also includes a first Level 3 guardrail layer.
+Requests are rejected before routing if they match prompt-injection, secret-leakage, or basic exfiltration patterns.
+
+The platform also now uses bearer tokens:
+
+- `agenthub-client-token` for public gateway requests
+- `agenthub-admin-token` for registry mutation and provider admin endpoints

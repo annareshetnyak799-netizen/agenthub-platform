@@ -21,10 +21,12 @@ Example:
 
 Behavior:
 
+- requires `Authorization: Bearer <client-token>`
 - validates and routes through `router-service`
 - proxies to the selected provider
 - supports streaming and non-streaming responses
 - returns `x-selected-provider` response header
+- rejects requests blocked by gateway guardrails with `400`
 
 ### `POST /v1/agents/{agent_id}/{method}`
 
@@ -50,9 +52,11 @@ Examples:
 
 Behavior:
 
+- requires `Authorization: Bearer <client-token>`
 - looks up the agent in `agent-registry`
 - validates the requested method
 - forwards the JSON body to the mock agent service
+- rejects requests blocked by gateway guardrails with `400`
 
 ### `GET /health`
 
@@ -113,6 +117,7 @@ Prometheus metrics endpoint.
 ### `POST /providers/register`
 
 Registers or updates a provider.
+Requires `Authorization: Bearer <admin-token>`.
 
 ### `GET /providers`
 
@@ -129,14 +134,17 @@ Returns the provider record.
 ### `POST /providers/{provider_id}/disable`
 
 Disables a provider manually.
+Requires `Authorization: Bearer <admin-token>`.
 
 ### `POST /providers/{provider_id}/enable`
 
 Re-enables a provider and clears cooldown state.
+Requires `Authorization: Bearer <admin-token>`.
 
 ### `POST /providers/{provider_id}/report-health`
 
 Used internally by the gateway to report success or failure.
+Requires `Authorization: Bearer <admin-token>`.
 
 Request:
 
@@ -161,6 +169,7 @@ Prometheus metrics endpoint.
 ### `POST /agents/register`
 
 Registers or updates an Agent Card.
+Requires `Authorization: Bearer <admin-token>`.
 
 Request:
 
@@ -197,6 +206,7 @@ Prometheus metrics endpoint.
 ### `POST /admin/failure-mode`
 
 Available on both mock providers.
+Requires `Authorization: Bearer <admin-token>`.
 
 Request:
 

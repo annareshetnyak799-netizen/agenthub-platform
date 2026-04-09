@@ -4,6 +4,7 @@ from tests.helpers import (
     AGENT_REGISTRY_URL,
     DEFAULT_TIMEOUT,
     PROVIDER_REGISTRY_URL,
+    admin_headers,
 )
 
 
@@ -33,6 +34,7 @@ def test_provider_registry_can_register_and_disable_provider() -> None:
     register_response = requests.post(
         f"{PROVIDER_REGISTRY_URL}/providers/register",
         json=payload,
+        headers=admin_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
     assert register_response.status_code == 201
@@ -40,6 +42,7 @@ def test_provider_registry_can_register_and_disable_provider() -> None:
 
     disable_response = requests.post(
         f"{PROVIDER_REGISTRY_URL}/providers/{provider_id}/disable",
+        headers=admin_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
     assert disable_response.status_code == 200
@@ -69,6 +72,7 @@ def test_agent_registry_can_register_new_agent_card() -> None:
     register_response = requests.post(
         f"{AGENT_REGISTRY_URL}/agents/register",
         json=payload,
+        headers=admin_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
     assert register_response.status_code == 201

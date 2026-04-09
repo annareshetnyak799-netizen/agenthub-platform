@@ -18,6 +18,9 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
+from .auth import require_bearer_token
+from .guardrails import evaluate_guardrails
+
 app = FastAPI(title="api-gateway", version="0.1.0")
 
 ROUTER_URL = os.getenv("ROUTER_URL", "http://router-service:8001")
@@ -40,6 +43,8 @@ MLFLOW_EXPERIMENT_NAME = os.getenv(
     "MLFLOW_EXPERIMENT_NAME",
     "agenthub-gateway-requests",
 )
+PLATFORM_API_TOKEN = os.getenv("PLATFORM_API_TOKEN", "agenthub-client-token")
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "agenthub-admin-token")
 
 REQUEST_COUNT = Counter(
     "agenthub_http_requests_total",
@@ -90,6 +95,11 @@ LLM_FAILOVERS = Counter(
     "agenthub_gateway_llm_failovers_total",
     "Failovers performed by the gateway after provider-side failures.",
     ["failed_provider_id", "fallback_provider_id", "model"],
+)
+GUARDRAIL_BLOCKS = Counter(
+    "agenthub_gateway_guardrail_blocks_total",
+    "Requests blocked by gateway guardrails.",
+    ["path", "category", "reason"],
 )
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 mlflow_client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
@@ -408,6 +418,7 @@ async def report_provider_health(
                     "latency_ms": latency_ms,
                     "status_code": status_code,
                 },
+                headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"},
             )
     except httpx.HTTPError:
         # Health reporting is best-effort and must not break the user request path.
@@ -455,6 +466,29 @@ async def get_agent_card(agent_id: str) -> dict[str, Any]:
     return response.json()
 
 
+def enforce_guardrails(payload: dict[str, Any], path: str, span: Any) -> None:
+    decision = evaluate_guardrails(payload)
+    if not decision.blocked:
+        return
+
+    GUARDRAIL_BLOCKS.labels(
+        path=path,
+        category=decision.category,
+        reason=decision.reason,
+    ).inc()
+    span.set_attribute("guardrail.blocked", True)
+    span.set_attribute("guardrail.category", decision.category)
+    span.set_attribute("guardrail.reason", decision.reason)
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "message": "Request blocked by guardrails",
+            "category": decision.category,
+            "reason": decision.reason,
+        },
+    )
+
+
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     method = request.method
@@ -493,12 +527,14 @@ async def metrics() -> Response:
 
 @app.post("/v1/agents/{agent_id}/{method_name}")
 async def invoke_agent(agent_id: str, method_name: str, request: Request) -> Response:
+    require_bearer_token(request, PLATFORM_API_TOKEN, "gateway")
     payload = await request.json()
     request_started = time.perf_counter()
 
     with tracer.start_as_current_span("gateway.invoke_agent") as span:
         span.set_attribute("agent.id", agent_id)
         span.set_attribute("agent.method", method_name)
+        enforce_guardrails(payload, "/v1/agents/{agent_id}/{method}", span)
 
         agent_card = await get_agent_card(agent_id)
         if agent_card.get("status") != "active":
@@ -561,6 +597,7 @@ async def invoke_agent(agent_id: str, method_name: str, request: Request) -> Res
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Any:
+    require_bearer_token(request, PLATFORM_API_TOKEN, "gateway")
     payload = await request.json()
     model = payload.get("model", "unknown")
     stream_flag = bool(payload.get("stream"))
@@ -569,6 +606,7 @@ async def chat_completions(request: Request) -> Any:
     with tracer.start_as_current_span("gateway.chat_completions") as span:
         span.set_attribute("llm.model", model)
         span.set_attribute("llm.stream", stream_flag)
+        enforce_guardrails(payload, "/v1/chat/completions", span)
 
         with tracer.start_as_current_span("gateway.route_request") as route_span:
             route_span.set_attribute("llm.model", model)
