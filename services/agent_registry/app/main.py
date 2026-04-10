@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 from threading import Lock
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,8 +16,7 @@ from pydantic import BaseModel, HttpUrl
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from .auth import require_bearer_token
-
-app = FastAPI(title="agent-registry", version="0.1.0")
+from .snapshot import load_snapshot, save_snapshot
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "agent-registry")
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
@@ -67,6 +67,29 @@ agent_store: dict[str, AgentCard] = {}
 agent_lock = Lock()
 
 
+def _persist() -> None:
+    """Write current store to disk. Must be called with agent_lock held."""
+    save_snapshot([a.model_dump() for a in agent_store.values()])
+
+
+def load_initial_agents() -> None:
+    # Prefer snapshot (survives restarts) over env seed.
+    persisted = load_snapshot()
+    source = persisted if persisted is not None else json.loads(INITIAL_AGENTS)
+    for item in source:
+        card = AgentCard(**item)
+        agent_store[card.agent_id] = card
+
+
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    load_initial_agents()
+    yield
+
+
+app = FastAPI(title="agent-registry", version="0.1.0", lifespan=lifespan)
+
+
 def setup_telemetry() -> None:
     resource = Resource.create({"service.name": SERVICE_NAME})
     provider = TracerProvider(resource=resource)
@@ -98,18 +121,6 @@ def normalize_path(path: str) -> str:
     if path.startswith("/agents"):
         return "/agents"
     return path
-
-
-def load_initial_agents() -> None:
-    raw = json.loads(INITIAL_AGENTS)
-    for item in raw:
-        card = AgentCard(**item)
-        agent_store[card.agent_id] = card
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    load_initial_agents()
 
 
 @app.middleware("http")
@@ -157,6 +168,7 @@ async def register_agent(payload: AgentRegisterRequest, request: Request) -> Age
         card = AgentCard(**payload.model_dump())
         with agent_lock:
             agent_store[card.agent_id] = card
+            _persist()
         REGISTRY_OPERATIONS.labels(
             operation="register",
             result="updated" if existed else "created",
@@ -165,14 +177,16 @@ async def register_agent(payload: AgentRegisterRequest, request: Request) -> Age
 
 
 @app.get("/agents", response_model=list[AgentCard])
-async def list_agents() -> list[AgentCard]:
+async def list_agents(request: Request) -> list[AgentCard]:
+    require_bearer_token(request, ADMIN_API_TOKEN, "agent-registry")
     REGISTRY_OPERATIONS.labels(operation="list", result="success").inc()
     with agent_lock:
         return sorted(agent_store.values(), key=lambda a: a.agent_id)
 
 
 @app.get("/agents/{agent_id}", response_model=AgentCard)
-async def get_agent(agent_id: str) -> AgentCard:
+async def get_agent(agent_id: str, request: Request) -> AgentCard:
+    require_bearer_token(request, ADMIN_API_TOKEN, "agent-registry")
     with agent_lock:
         agent = agent_store.get(agent_id)
     if agent is None:
@@ -180,3 +194,15 @@ async def get_agent(agent_id: str) -> AgentCard:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     REGISTRY_OPERATIONS.labels(operation="get", result="success").inc()
     return agent
+
+
+@app.delete("/agents/{agent_id}", status_code=204)
+async def delete_agent(agent_id: str, request: Request) -> None:
+    require_bearer_token(request, ADMIN_API_TOKEN, "agent-registry")
+    with agent_lock:
+        if agent_id not in agent_store:
+            REGISTRY_OPERATIONS.labels(operation="delete", result="not_found").inc()
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        del agent_store[agent_id]
+        _persist()
+    REGISTRY_OPERATIONS.labels(operation="delete", result="success").inc()

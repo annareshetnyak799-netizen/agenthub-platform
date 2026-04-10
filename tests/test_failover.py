@@ -42,6 +42,7 @@ def test_health_aware_failover_ejects_failing_provider(
 
         provider_record_response = requests.get(
             f"{PROVIDER_REGISTRY_URL}/providers/mock-openai",
+            headers=admin_headers(),
             timeout=DEFAULT_TIMEOUT,
         )
         assert provider_record_response.status_code == 200

@@ -157,7 +157,7 @@ Run them with:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r tests/requirements.txt
-pytest tests -v
+PYTHONNOUSERSITE=1 python -m pytest -p no:debugging tests -v
 ```
 
 ### 1. Base LLM request
@@ -209,7 +209,8 @@ curl http://localhost:8005/routing/stats
 Expected:
 
 - both providers have `last_latency_ms`
-- routing prefers the faster provider when both are healthy
+- routing stays in round robin while any peer is still cold
+- routing prefers the faster provider only after all peers are warmed up
 
 ### 4. Health-aware routing and failover
 
@@ -232,6 +233,7 @@ Expected:
 - `failure_count` increments
 - `cooldown_until` is set
 - subsequent requests route to the healthy provider
+- if more than one healthy fallback remains, the gateway can continue retrying across that remaining pool
 
 ### 5. Agent invocation
 

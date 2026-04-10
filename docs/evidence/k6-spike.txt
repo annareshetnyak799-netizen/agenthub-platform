@@ -1,0 +1,30 @@
+execution: local
+script: /scripts/k6_spike.js
+
+scenarios:
+- default: Up to 50 looping VUs for 45s over 6 stages
+
+THRESHOLDS
+- http_req_duration p(95)<8000: passed, p(95)=3.69s
+- http_req_failed rate<0.10: passed, rate=0.00%
+
+TOTAL RESULTS
+- checks_total: 810
+- checks_succeeded: 100.00%
+- checks_failed: 0.00%
+- spike load returns 2xx or 503: passed
+- no internal server error: passed
+
+HTTP
+- http_req_duration avg=2.39s med=2.91s p(90)=3.53s p(95)=3.69s max=4.49s
+- http_req_failed=0.00% (0 out of 405)
+- http_reqs=405
+
+EXECUTION
+- iteration_duration avg=2.89s p(95)=4.2s max=4.99s
+- iterations=405
+- vus min=1 max=50
+
+NETWORK
+- data_received=203 kB
+- data_sent=119 kB

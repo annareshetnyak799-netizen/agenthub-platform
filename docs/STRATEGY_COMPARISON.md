@@ -40,27 +40,27 @@ This allows operators to express preferred providers.
 
 ### Step 4. Choose between round robin and latency-aware routing
 
-If all candidates in the active priority tier already have latency samples:
+The selected priority tier follows a short warm-up phase:
 
-- choose the provider with the lowest `last_latency_ms`
+- if any candidate is still **cold** and has no `last_latency_ms`, use round robin across the whole priority tier
+- once **all** candidates in that tier are warm, switch to latency-aware selection
 
-If at least one candidate does not yet have latency data:
+This keeps the pool measurable and predictable:
 
-- use round robin
-
-This design prevents cold-start bias and keeps the system observable and explainable.
+1. **No cold-start lock-in** — new or restarted providers continue to receive warm-up traffic until they have a latency sample
+2. **No hidden starvation** — a provider cannot be excluded forever just because another provider got measured first
+3. **Stable failover validation** — providers that have not yet been sampled can still be selected and marked unhealthy when they begin failing
 
 ## Why Not Use Pure Latency Routing From the First Request
 
-A pure latency policy can get stuck on whichever provider receives the first measured request.
-That creates a feedback loop:
+A pure latency policy gets stuck on whichever provider received the first sample:
 
-- provider A gets the first sample
-- provider B remains unmeasured
-- router keeps preferring provider A
-- provider B never gets a chance to warm up
+- provider A gets measured first
+- provider B has no sample yet
+- router always prefers provider A
+- provider B is never selected, never measured, and stays cold forever
 
-The current implementation avoids that by keeping round robin until all candidates have at least one latency sample.
+The current implementation avoids that by keeping round robin active until every provider in the selected priority tier has at least one latency sample.
 
 ## Operational Trade-offs
 

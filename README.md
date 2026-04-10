@@ -2,7 +2,7 @@
 
 AgentHub Platform is an infrastructure-first agent platform for registering A2A agents, connecting multiple LLM providers, routing requests intelligently, and collecting end-to-end telemetry.
 
-The current prototype intentionally keeps registry state in memory to preserve a simple and deterministic local stack; persistent storage would be the next step for a production-grade control plane.
+The current prototype keeps the control plane lightweight by using file-backed JSON snapshots for the registries; a production-grade next step would be moving that state to PostgreSQL or another durable shared store.
 
 The project is designed as a staged implementation:
 
@@ -95,7 +95,7 @@ Run the automated integration suite against the live local stack:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r tests/requirements.txt
-pytest tests -v
+PYTHONNOUSERSITE=1 python -m pytest -p no:debugging tests -v
 ```
 
 Monitoring endpoints after startup:
@@ -142,15 +142,21 @@ curl -X POST http://localhost:8000/v1/agents/summarizer-agent/summarize_text \
 ## Level 2 Delivery Notes
 
 The first Level 2 service is `provider-registry`.
-It stores provider metadata in memory, supports runtime registration, and is now used by `router-service` as the primary source of active providers, with static config kept as a fallback path.
+It stores provider metadata in a small local JSON snapshot, supports runtime registration, and is now used by `router-service` as the primary source of active providers, with static config kept as a fallback path.
 
 The second Level 2 service is `agent-registry`.
-It stores Agent Cards in memory and allows `router-service` to validate `target_agent` values passed in generation requests.
+It stores Agent Cards in a local JSON snapshot and allows `router-service` to validate `target_agent` values passed in generation requests.
 
 The current routing layer also supports a basic health-aware flow:
 - `api-gateway` reports provider success and failure back to `provider-registry`
 - unhealthy providers are temporarily excluded from routing during a cooldown window
+- failover can continue across the remaining healthy providers instead of stopping after the first retry
 - mock providers expose `/admin/failure-mode` so failover can be demonstrated locally
+
+Docker startup is also health-gated:
+- core application services wait for `otel-collector`
+- public gateway waits for router, registries, agents, and MLflow to become healthy
+- Prometheus and Grafana start only after the application plane is ready
 
 The gateway now also exposes Level 2 request telemetry for LLM traffic:
 - `agenthub_gateway_llm_ttft_seconds`

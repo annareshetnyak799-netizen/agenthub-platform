@@ -71,6 +71,7 @@ Prometheus metrics endpoint.
 ### `POST /route`
 
 Selects a provider for a model request.
+Requires `Authorization: Bearer <admin-token>`.
 
 Request:
 
