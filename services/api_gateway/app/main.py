@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -18,7 +19,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
-from .auth import require_bearer_token
+from .auth import require_bearer_token, require_client_key
 from .guardrails import evaluate_guardrails
 
 app = FastAPI(title="api-gateway", version="0.1.0")
@@ -104,6 +105,7 @@ GUARDRAIL_BLOCKS = Counter(
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 mlflow_client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
 mlflow_experiment_id: str | None = None
+_mlflow_experiment_lock = Lock()
 
 
 def setup_telemetry() -> None:
@@ -144,12 +146,15 @@ def get_mlflow_experiment_id() -> str | None:
         return None
     if mlflow_experiment_id is not None:
         return mlflow_experiment_id
-
-    experiment = mlflow.get_experiment_by_name(MLFLOW_EXPERIMENT_NAME)
-    if experiment is None:
-        mlflow_experiment_id = mlflow.create_experiment(MLFLOW_EXPERIMENT_NAME)
-    else:
-        mlflow_experiment_id = experiment.experiment_id
+    with _mlflow_experiment_lock:
+        # Re-check inside the lock: another thread may have set it while we waited.
+        if mlflow_experiment_id is not None:
+            return mlflow_experiment_id
+        experiment = mlflow.get_experiment_by_name(MLFLOW_EXPERIMENT_NAME)
+        if experiment is None:
+            mlflow_experiment_id = mlflow.create_experiment(MLFLOW_EXPERIMENT_NAME)
+        else:
+            mlflow_experiment_id = experiment.experiment_id
     return mlflow_experiment_id
 
 
@@ -434,7 +439,11 @@ async def request_route(
         route_payload["exclude_provider_ids"] = exclude_provider_ids
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as route_client:
-        route_response = await route_client.post(f"{ROUTER_URL}/route", json=route_payload)
+        route_response = await route_client.post(
+            f"{ROUTER_URL}/route",
+            json=route_payload,
+            headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"},
+        )
         if route_response.status_code >= 400:
             UPSTREAM_ERRORS.labels(
                 upstream="router-service",
@@ -454,7 +463,10 @@ async def request_route(
 
 async def get_agent_card(agent_id: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as client:
-        response = await client.get(f"{AGENT_REGISTRY_URL}/agents/{agent_id}")
+        response = await client.get(
+            f"{AGENT_REGISTRY_URL}/agents/{agent_id}",
+            headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"},
+        )
     if response.status_code == 404:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     if response.status_code >= 400:
@@ -527,13 +539,15 @@ async def metrics() -> Response:
 
 @app.post("/v1/agents/{agent_id}/{method_name}")
 async def invoke_agent(agent_id: str, method_name: str, request: Request) -> Response:
-    require_bearer_token(request, PLATFORM_API_TOKEN, "gateway")
+    api_key = require_client_key(request)
     payload = await request.json()
     request_started = time.perf_counter()
 
     with tracer.start_as_current_span("gateway.invoke_agent") as span:
         span.set_attribute("agent.id", agent_id)
         span.set_attribute("agent.method", method_name)
+        span.set_attribute("auth.key_id", api_key.key_id)
+        span.set_attribute("auth.key_name", api_key.name)
         enforce_guardrails(payload, "/v1/agents/{agent_id}/{method}", span)
 
         agent_card = await get_agent_card(agent_id)
@@ -597,7 +611,7 @@ async def invoke_agent(agent_id: str, method_name: str, request: Request) -> Res
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Any:
-    require_bearer_token(request, PLATFORM_API_TOKEN, "gateway")
+    api_key = require_client_key(request)
     payload = await request.json()
     model = payload.get("model", "unknown")
     stream_flag = bool(payload.get("stream"))
@@ -606,6 +620,8 @@ async def chat_completions(request: Request) -> Any:
     with tracer.start_as_current_span("gateway.chat_completions") as span:
         span.set_attribute("llm.model", model)
         span.set_attribute("llm.stream", stream_flag)
+        span.set_attribute("auth.key_id", api_key.key_id)
+        span.set_attribute("auth.key_name", api_key.name)
         enforce_guardrails(payload, "/v1/chat/completions", span)
 
         with tracer.start_as_current_span("gateway.route_request") as route_span:
@@ -650,109 +666,134 @@ async def chat_completions(request: Request) -> Any:
                         latency_ms=(time.perf_counter() - request_started) * 1000,
                         status_code=upstream_response.status_code,
                     )
-                    if upstream_response.status_code >= 500:
-                        with tracer.start_as_current_span("gateway.failover_route_request") as failover_span:
-                            failover_span.set_attribute("llm.failed_provider", route["provider_id"])
-                            retry_route = await request_route(
-                                payload,
-                                exclude_provider_ids=[route["provider_id"]],
-                            )
-                            failover_span.set_attribute("llm.selected_provider", retry_route["provider_id"])
+
+                    if upstream_response.status_code < 500:
+                        raise HTTPException(
+                            status_code=upstream_response.status_code,
+                            detail=error_body.decode("utf-8", errors="ignore"),
+                        )
+
+                    # 5xx: try remaining providers in a loop until one succeeds.
+                    tried_providers = [route["provider_id"]]
+                    last_error_body = error_body
+                    last_error_status = upstream_response.status_code
+                    final_route: dict[str, Any] | None = None
+                    final_client: httpx.AsyncClient | None = None
+                    final_response: httpx.Response | None = None
+
+                    while True:
+                        with tracer.start_as_current_span("gateway.failover_route_request") as fo_span:
+                            fo_span.set_attribute("llm.failed_provider", tried_providers[-1])
+                            try:
+                                next_route = await request_route(
+                                    payload,
+                                    exclude_provider_ids=tried_providers,
+                                )
+                            except HTTPException:
+                                raise HTTPException(
+                                    status_code=last_error_status,
+                                    detail=last_error_body.decode("utf-8", errors="ignore"),
+                                )
+                            fo_span.set_attribute("llm.selected_provider", next_route["provider_id"])
                             LLM_FAILOVERS.labels(
-                                failed_provider_id=route["provider_id"],
-                                fallback_provider_id=retry_route["provider_id"],
+                                failed_provider_id=tried_providers[-1],
+                                fallback_provider_id=next_route["provider_id"],
                                 model=model,
                             ).inc()
 
-                        retry_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0))
-                        retry_request = retry_client.build_request(
+                        next_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0))
+                        next_request = next_client.build_request(
                             "POST",
-                            f"{retry_route['provider_url']}/v1/chat/completions",
+                            f"{next_route['provider_url']}/v1/chat/completions",
                             json=payload,
                         )
-                        retry_response = await retry_client.send(retry_request, stream=True)
+                        next_response = await next_client.send(next_request, stream=True)
+                        tried_providers.append(next_route["provider_id"])
 
-                        if retry_response.status_code >= 400:
-                            retry_error_body = await retry_response.aread()
-                            await retry_response.aclose()
-                            await retry_client.aclose()
+                        if next_response.status_code >= 500:
+                            last_error_body = await next_response.aread()
+                            await next_response.aclose()
+                            await next_client.aclose()
                             await report_provider_health(
-                                provider_id=retry_route["provider_id"],
+                                provider_id=next_route["provider_id"],
                                 success=False,
                                 latency_ms=(time.perf_counter() - request_started) * 1000,
-                                status_code=retry_response.status_code,
+                                status_code=next_response.status_code,
+                            )
+                            last_error_status = next_response.status_code
+                            continue
+
+                        if next_response.status_code >= 400:
+                            last_error_body = await next_response.aread()
+                            await next_response.aclose()
+                            await next_client.aclose()
+                            await report_provider_health(
+                                provider_id=next_route["provider_id"],
+                                success=False,
+                                latency_ms=(time.perf_counter() - request_started) * 1000,
+                                status_code=next_response.status_code,
                             )
                             raise HTTPException(
-                                status_code=retry_response.status_code,
-                                detail=retry_error_body.decode("utf-8", errors="ignore"),
+                                status_code=next_response.status_code,
+                                detail=last_error_body.decode("utf-8", errors="ignore"),
                             )
 
                         await report_provider_health(
-                            provider_id=retry_route["provider_id"],
+                            provider_id=next_route["provider_id"],
                             success=True,
                             latency_ms=(time.perf_counter() - request_started) * 1000,
-                            status_code=retry_response.status_code,
+                            status_code=next_response.status_code,
                         )
+                        final_route = next_route
+                        final_client = next_client
+                        final_response = next_response
+                        break
 
-                        stream_state = StreamingTelemetryState(
-                            request_started=request_started,
-                            prompt_tokens=prompt_tokens,
-                        )
+                    stream_state = StreamingTelemetryState(
+                        request_started=request_started,
+                        prompt_tokens=prompt_tokens,
+                    )
+                    _final_route = final_route
+                    _final_client = final_client
+                    _final_response = final_response
 
-                        async def retry_stream_bytes():
-                            try:
-                                async for chunk in retry_response.aiter_bytes():
-                                    stream_state.consume(chunk)
-                                    yield chunk
-                            finally:
-                                if not stream_state.recorded:
-                                    ttft_seconds = stream_state.ttft_seconds()
-                                    tpot_seconds = stream_state.tpot_seconds()
-                                    cost = record_llm_metrics(
-                                        retry_route,
-                                        model,
-                                        True,
-                                        stream_state.prompt_tokens,
-                                        stream_state.completion_tokens,
-                                        ttft_seconds,
-                                        tpot_seconds,
-                                    )
-                                    annotate_span_with_llm_telemetry(
-                                        span,
-                                        retry_route,
-                                        stream_state.prompt_tokens,
-                                        stream_state.completion_tokens,
-                                        ttft_seconds,
-                                        tpot_seconds,
-                                        cost,
-                                        True,
-                                    )
-                                    await log_request_to_mlflow(
-                                        retry_route,
-                                        model,
-                                        True,
-                                        stream_state.prompt_tokens,
-                                        stream_state.completion_tokens,
-                                        ttft_seconds,
-                                        tpot_seconds,
-                                        cost,
-                                        True,
-                                        time.perf_counter() - request_started,
-                                        retry_response.status_code,
-                                    )
-                                    stream_state.recorded = True
-                                await retry_response.aclose()
-                                await retry_client.aclose()
+                    async def retry_stream_bytes():
+                        try:
+                            async for chunk in _final_response.aiter_bytes():
+                                stream_state.consume(chunk)
+                                yield chunk
+                        finally:
+                            if not stream_state.recorded:
+                                ttft_s = stream_state.ttft_seconds()
+                                tpot_s = stream_state.tpot_seconds()
+                                cost = record_llm_metrics(
+                                    _final_route, model, True,
+                                    stream_state.prompt_tokens,
+                                    stream_state.completion_tokens,
+                                    ttft_s, tpot_s,
+                                )
+                                annotate_span_with_llm_telemetry(
+                                    span, _final_route,
+                                    stream_state.prompt_tokens,
+                                    stream_state.completion_tokens,
+                                    ttft_s, tpot_s, cost, True,
+                                )
+                                await log_request_to_mlflow(
+                                    _final_route, model, True,
+                                    stream_state.prompt_tokens,
+                                    stream_state.completion_tokens,
+                                    ttft_s, tpot_s, cost, True,
+                                    time.perf_counter() - request_started,
+                                    _final_response.status_code,
+                                )
+                                stream_state.recorded = True
+                            await _final_response.aclose()
+                            await _final_client.aclose()
 
-                        return StreamingResponse(
-                            retry_stream_bytes(),
-                            media_type=retry_response.headers.get("content-type", "text/event-stream"),
-                            headers={"x-selected-provider": retry_route["provider_id"]},
-                        )
-
-                    raise HTTPException(
-                        status_code=upstream_response.status_code,
-                        detail=error_body.decode("utf-8", errors="ignore"),
+                    return StreamingResponse(
+                        retry_stream_bytes(),
+                        media_type=_final_response.headers.get("content-type", "text/event-stream"),
+                        headers={"x-selected-provider": _final_route["provider_id"]},
                     )
 
                 await report_provider_health(
@@ -839,138 +880,112 @@ async def chat_completions(request: Request) -> Any:
                 latency_ms=(time.perf_counter() - request_started) * 1000,
                 status_code=provider_response.status_code,
             )
-            if provider_response.status_code >= 500:
+
+            if provider_response.status_code < 500:
+                # 4xx errors are not provider failures — do not failover.
+                raise HTTPException(
+                    status_code=provider_response.status_code,
+                    detail=provider_response.text,
+                )
+
+            # 5xx: try remaining providers in a loop until one succeeds.
+            tried_providers = [route["provider_id"]]
+            current_response = provider_response
+            current_route = route
+            failover_used = False
+
+            while current_response.status_code >= 500:
                 with tracer.start_as_current_span("gateway.failover_route_request") as failover_span:
-                    failover_span.set_attribute("llm.failed_provider", route["provider_id"])
-                    retry_route = await request_route(
-                        payload,
-                        exclude_provider_ids=[route["provider_id"]],
-                    )
-                    failover_span.set_attribute("llm.selected_provider", retry_route["provider_id"])
+                    failover_span.set_attribute("llm.failed_provider", current_route["provider_id"])
+                    try:
+                        next_route = await request_route(
+                            payload,
+                            exclude_provider_ids=tried_providers,
+                        )
+                    except HTTPException:
+                        # No more providers available — return last error.
+                        raise HTTPException(
+                            status_code=current_response.status_code,
+                            detail=current_response.text,
+                        )
+                    failover_span.set_attribute("llm.selected_provider", next_route["provider_id"])
                     LLM_FAILOVERS.labels(
-                        failed_provider_id=route["provider_id"],
-                        fallback_provider_id=retry_route["provider_id"],
+                        failed_provider_id=current_route["provider_id"],
+                        fallback_provider_id=next_route["provider_id"],
                         model=model,
                     ).inc()
 
                 async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as retry_client:
-                    retry_response = await retry_client.post(
-                        f"{retry_route['provider_url']}/v1/chat/completions",
+                    current_response = await retry_client.post(
+                        f"{next_route['provider_url']}/v1/chat/completions",
                         json=payload,
                     )
 
-                if retry_response.status_code >= 400:
-                    await report_provider_health(
-                        provider_id=retry_route["provider_id"],
-                        success=False,
-                        latency_ms=(time.perf_counter() - request_started) * 1000,
-                        status_code=retry_response.status_code,
-                    )
-                else:
-                    await report_provider_health(
-                        provider_id=retry_route["provider_id"],
-                        success=True,
-                        latency_ms=(time.perf_counter() - request_started) * 1000,
-                        status_code=retry_response.status_code,
-                    )
-
-                if retry_response.status_code < 400:
-                    retry_payload = json.loads(retry_response.text)
-                    prompt_tokens, completion_tokens = extract_usage_from_response(
-                        retry_payload,
-                        payload,
-                    )
-                    ttft_seconds = time.perf_counter() - request_started
-                    cost = record_llm_metrics(
-                        retry_route,
-                        model,
-                        False,
-                        prompt_tokens,
-                        completion_tokens,
-                        ttft_seconds,
-                        None,
-                    )
-                    annotate_span_with_llm_telemetry(
-                        span,
-                        retry_route,
-                        prompt_tokens,
-                        completion_tokens,
-                        ttft_seconds,
-                        None,
-                        cost,
-                        True,
-                    )
-                    await log_request_to_mlflow(
-                        retry_route,
-                        model,
-                        False,
-                        prompt_tokens,
-                        completion_tokens,
-                        ttft_seconds,
-                        None,
-                        cost,
-                        True,
-                        time.perf_counter() - request_started,
-                        retry_response.status_code,
-                    )
-
-                return JSONResponse(
-                    content=json.loads(retry_response.text),
-                    status_code=retry_response.status_code,
-                    media_type=retry_response.headers.get("content-type", "application/json"),
-                    headers={"x-selected-provider": retry_route["provider_id"]},
+                await report_provider_health(
+                    provider_id=next_route["provider_id"],
+                    success=current_response.status_code < 400,
+                    latency_ms=(time.perf_counter() - request_started) * 1000,
+                    status_code=current_response.status_code,
                 )
-        else:
-            await report_provider_health(
-                provider_id=route["provider_id"],
-                success=True,
-                latency_ms=(time.perf_counter() - request_started) * 1000,
-                status_code=provider_response.status_code,
-            )
-            response_payload = json.loads(provider_response.text)
-            prompt_tokens, completion_tokens = extract_usage_from_response(
-                response_payload,
-                payload,
-            )
+                tried_providers.append(next_route["provider_id"])
+                current_route = next_route
+                failover_used = True
+
+            # current_response is a success (< 400).
+            retry_payload = json.loads(current_response.text)
+            prompt_tokens, completion_tokens = extract_usage_from_response(retry_payload, payload)
             ttft_seconds = time.perf_counter() - request_started
             cost = record_llm_metrics(
-                route,
-                model,
-                False,
-                prompt_tokens,
-                completion_tokens,
-                ttft_seconds,
-                None,
+                current_route, model, False,
+                prompt_tokens, completion_tokens, ttft_seconds, None,
             )
             annotate_span_with_llm_telemetry(
-                span,
-                route,
-                prompt_tokens,
-                completion_tokens,
-                ttft_seconds,
-                None,
-                cost,
-                False,
+                span, current_route,
+                prompt_tokens, completion_tokens, ttft_seconds, None,
+                cost, failover_used,
             )
             await log_request_to_mlflow(
-                route,
-                model,
-                False,
-                prompt_tokens,
-                completion_tokens,
-                ttft_seconds,
-                None,
-                cost,
-                False,
+                current_route, model, False,
+                prompt_tokens, completion_tokens, ttft_seconds, None,
+                cost, failover_used,
                 time.perf_counter() - request_started,
-                provider_response.status_code,
+                current_response.status_code,
+            )
+            return JSONResponse(
+                content=retry_payload,
+                status_code=current_response.status_code,
+                media_type=current_response.headers.get("content-type", "application/json"),
+                headers={"x-selected-provider": current_route["provider_id"]},
             )
 
-        content_type = provider_response.headers.get("content-type", "application/json")
-
-        return JSONResponse(
-            content=json.loads(provider_response.text),
+        await report_provider_health(
+            provider_id=route["provider_id"],
+            success=True,
+            latency_ms=(time.perf_counter() - request_started) * 1000,
             status_code=provider_response.status_code,
-            media_type=content_type,
+        )
+        response_payload = json.loads(provider_response.text)
+        prompt_tokens, completion_tokens = extract_usage_from_response(response_payload, payload)
+        ttft_seconds = time.perf_counter() - request_started
+        cost = record_llm_metrics(
+            route, model, False,
+            prompt_tokens, completion_tokens, ttft_seconds, None,
+        )
+        annotate_span_with_llm_telemetry(
+            span, route,
+            prompt_tokens, completion_tokens, ttft_seconds, None,
+            cost, False,
+        )
+        await log_request_to_mlflow(
+            route, model, False,
+            prompt_tokens, completion_tokens, ttft_seconds, None,
+            cost, False,
+            time.perf_counter() - request_started,
+            provider_response.status_code,
+        )
+        return JSONResponse(
+            content=response_payload,
+            status_code=provider_response.status_code,
+            media_type=provider_response.headers.get("content-type", "application/json"),
             headers={"x-selected-provider": route["provider_id"]},
         )

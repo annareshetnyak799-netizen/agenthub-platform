@@ -6,6 +6,9 @@
 docker compose up --build
 ```
 
+The Compose stack uses `depends_on: condition: service_healthy` for the core service graph.
+This means the public gateway starts only after the router, registries, mock agents, `otel-collector`, and MLflow pass their health checks.
+
 ## Automated Test Suite
 
 Install the lightweight test dependencies and run the black-box integration suite against the live stack:
@@ -14,7 +17,7 @@ Install the lightweight test dependencies and run the black-box integration suit
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r tests/requirements.txt
-pytest tests -v
+PYTHONNOUSERSITE=1 python -m pytest -p no:debugging tests -v
 ```
 
 ## Load Test Pack
@@ -102,6 +105,7 @@ Then send a shared-model request through the gateway and observe:
 
 - provider marked `unhealthy` in `provider-registry`
 - failover to `mock-anthropic`
+- additional healthy providers remain eligible for subsequent retries if more than one fallback exists
 - Jaeger trace includes failover path
 - MLflow run captures failover metadata
 

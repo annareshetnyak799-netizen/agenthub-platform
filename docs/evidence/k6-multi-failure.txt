@@ -1,0 +1,38 @@
+execution: local
+script: /scripts/k6_multi_failure.js
+
+scenarios:
+- default: 5 looping VUs for 20s
+
+THRESHOLDS
+- http_req_duration p(95)<10000: passed, p(95)=647.68ms
+- http_req_failed rate<1.0: passed, rate=92.78%
+
+TOTAL RESULTS
+- checks_total: 273
+- checks_succeeded: 100.00%
+- checks_failed: 0.00%
+- openai failure mode enabled: passed
+- anthropic failure mode enabled: passed
+- gateway responds (no hang): passed
+- no unhandled panic (not 500): passed
+- expected error status: passed
+- platform recovered after multi-failure: passed
+
+HTTP
+- http_req_duration avg=126.45ms med=82.04ms p(90)=110.43ms p(95)=647.68ms max=981.48ms
+- http_req_failed=92.78% (90 out of 97)
+- http_reqs=97
+
+EXECUTION
+- iteration_duration avg=1.13s p(95)=1.59s max=1.98s
+- iterations=90
+- vus min=5 max=5
+
+NETWORK
+- data_received=20 kB
+- data_sent=28 kB
+
+Note:
+- The elevated http_req_failed value is expected in this scenario because both providers are intentionally forced into failure mode.
+- The acceptance signal is the checks block above: the gateway must return a controlled error, avoid 500/panic behavior, and recover after teardown.

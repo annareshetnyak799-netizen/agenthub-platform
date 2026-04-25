@@ -17,6 +17,17 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from pydantic import BaseModel
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "agenthub-admin-token")
+
+
+def require_bearer_token(request: Request, expected_token: str, realm: str) -> None:
+    authorization = request.headers.get("authorization", "")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail=f"Missing bearer token for {realm}")
+    token = authorization.removeprefix("Bearer ").strip()
+    if token != expected_token:
+        raise HTTPException(status_code=401, detail=f"Invalid bearer token for {realm}")
+
 app = FastAPI(title="router-service", version="0.1.0")
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "router-service")
@@ -175,11 +186,11 @@ def select_provider(
     )
 
     if all_have_latency:
-        min_latency = min(float(candidate["last_latency_ms"]) for candidate in priority_candidates)
+        min_latency = min(float(c["last_latency_ms"]) for c in priority_candidates)
         best_candidates = [
-            candidate
-            for candidate in priority_candidates
-            if float(candidate["last_latency_ms"]) == min_latency
+            c
+            for c in priority_candidates
+            if float(c["last_latency_ms"]) == min_latency
         ]
         strategy = "priority_latency_aware"
     else:
@@ -201,6 +212,7 @@ async def get_active_providers() -> tuple[list[dict[str, Any]], str]:
             response = await client.get(
                 f"{PROVIDER_REGISTRY_URL}/providers",
                 params={"enabled_only": "true", "healthy_only": "true"},
+                headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"},
             )
             response.raise_for_status()
             return response.json(), "provider_registry"
@@ -210,7 +222,10 @@ async def get_active_providers() -> tuple[list[dict[str, Any]], str]:
 
 async def validate_target_agent(target_agent: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
-        response = await client.get(f"{AGENT_REGISTRY_URL}/agents/{target_agent}")
+        response = await client.get(
+            f"{AGENT_REGISTRY_URL}/agents/{target_agent}",
+            headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"},
+        )
         if response.status_code == 404:
             ROUTING_ERRORS.labels(reason="agent_not_registered").inc()
             raise HTTPException(
@@ -248,7 +263,8 @@ async def routing_stats() -> dict[str, Any]:
 
 
 @app.post("/route")
-async def route(request: RouteRequest) -> dict[str, Any]:
+async def route(request: RouteRequest, http_request: Request) -> dict[str, Any]:
+    require_bearer_token(http_request, ADMIN_API_TOKEN, "router-service")
     with tracer.start_as_current_span("router.route") as span:
         span.set_attribute("llm.model", request.model)
         span.set_attribute("llm.stream", bool(request.stream))

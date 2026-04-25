@@ -32,8 +32,8 @@ AgentHub is an infrastructure-first agent platform that:
 
 Current persistence model:
 
-- `agent-registry` and `provider-registry` intentionally keep state in memory for a deterministic, easy-to-run course prototype
-- this keeps the local stack simple while the main focus remains routing, failover, observability, guardrails, and authorization
+- `agent-registry` and `provider-registry` persist control-plane state to small JSON snapshots mounted through Docker volumes
+- this keeps the local stack deterministic and easy to review while still allowing registrations and health state to survive container restarts
 - a production-grade next step would be adding persistent storage such as PostgreSQL for control-plane data
 
 ## Runtime Topology
@@ -91,8 +91,8 @@ Detailed flow:
    - `health_status == healthy`
 5. Router selects a provider using:
    - priority
-   - latency-aware routing if all candidates have latency samples
-   - round robin fallback otherwise
+   - round robin warm-up while any candidate in the selected priority tier is still cold
+   - latency-aware routing only after all selected candidates have latency samples
 6. Gateway forwards the request to the selected provider.
 7. Gateway returns the provider response to the client.
 8. Gateway reports success and latency back to `provider-registry`.
@@ -121,7 +121,7 @@ Important behavior:
 Client -> api-gateway -> failing provider (5xx)
                        -> report unhealthy to provider-registry
                        -> ask router for a new route excluding failed provider
-                       -> retry once against a healthy provider
+                       -> retry across the remaining healthy providers
 Client <- successful fallback response
 ```
 
@@ -178,6 +178,7 @@ Current token split:
 
 - client token for `api-gateway` request entrypoints
 - admin token for:
+  - gateway to `router-service` route selection
   - provider registry mutation endpoints
   - agent registry registration endpoint
   - mock provider admin failure mode
@@ -305,14 +306,20 @@ This satisfies the Level 2 requirement to trace both:
 
 ### Fully implemented in current repo
 
-- Level 1 deployment and observability stack
-- Level 2 registries and smart provider routing
-- Level 2 request telemetry and MLflow integration
-- minimal runnable mock agents
+- Level 1: Docker Compose deployment and observability stack (Prometheus, Grafana, OTel, Jaeger)
+- Level 1: LLM balancer with round-robin, weighted, and streaming passthrough
+- Level 2: Provider Registry and Agent Registry with dynamic registration
+- Level 2: Latency-aware and health-aware routing with cooldown and auto-recovery
+- Level 2: TTFT, TPOT, token counts, cost telemetry in Prometheus and MLflow
+- Level 3: Guardrails — prompt injection, secret leakage, and exfiltration patterns with unicode normalisation
+- Level 3: Bearer-token authorisation — client token for gateway, admin token for registry mutations
+- Level 3: Per-key identity store — multiple named client keys with `key_id` logged in spans
+- Level 3: Load and failure tests — ramp-up, spike, failover, and multi-provider failure scenarios
+- File-based JSON persistence for Provider Registry and Agent Registry (survives container restarts)
 
-### Planned for Level 3
+### Known limitations and next steps
 
-- guardrails
-- token-based authorization
-- structured load and failure test automation
-- formal resilience benchmarking
+- Registry state uses a single JSON file per service; a production deployment would use PostgreSQL or etcd
+- Guardrails use regex with unicode normalisation; an ML-based classifier (e.g. a fine-tuned encoder) would improve recall against obfuscated injections
+- Bearer tokens have no TTL or rotation; a production system would use short-lived JWTs or OIDC
+- Load tests are sized for course-level reproducibility; a production benchmark would run on dedicated hardware with much higher VU counts

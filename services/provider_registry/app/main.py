@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 from threading import Lock
 from typing import Any
 
@@ -16,8 +17,7 @@ from pydantic import BaseModel, Field
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from .auth import require_bearer_token
-
-app = FastAPI(title="provider-registry", version="0.1.0")
+from .snapshot import load_snapshot, save_snapshot
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "provider-registry")
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv(
@@ -84,6 +84,49 @@ provider_store: dict[str, ProviderRecord] = {}
 provider_lock = Lock()
 
 
+def get_cooldown_seconds() -> int:
+    return max(int(os.getenv("PROVIDER_COOLDOWN_SECONDS", "30")), 1)
+
+
+def reconcile_provider(provider: ProviderRecord) -> ProviderRecord:
+    if (
+        provider.health_status == "unhealthy"
+        and provider.cooldown_until is not None
+        and provider.cooldown_until <= time.time()
+    ):
+        return provider.model_copy(
+            update={
+                "health_status": "healthy",
+                "cooldown_until": None,
+                "failure_count": 0,
+            }
+        )
+    return provider
+
+
+def _persist() -> None:
+    """Write current store to disk. Must be called with provider_lock held."""
+    save_snapshot([r.model_dump() for r in provider_store.values()])
+
+
+def load_initial_providers() -> None:
+    # Prefer snapshot (survives restarts) over env seed.
+    persisted = load_snapshot()
+    source = persisted if persisted is not None else json.loads(INITIAL_PROVIDERS)
+    for item in source:
+        record = ProviderRecord(**item)
+        provider_store[record.provider_id] = record
+
+
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    load_initial_providers()
+    yield
+
+
+app = FastAPI(title="provider-registry", version="0.1.0", lifespan=lifespan)
+
+
 def setup_telemetry() -> None:
     resource = Resource.create({"service.name": SERVICE_NAME})
     provider = TracerProvider(resource=resource)
@@ -114,43 +157,13 @@ def normalize_path(path: str) -> str:
         return "/providers/{provider_id}/disable"
     if path.startswith("/providers/") and path.endswith("/enable"):
         return "/providers/{provider_id}/enable"
+    if path.startswith("/providers/") and path.endswith("/report-health"):
+        return "/providers/{provider_id}/report-health"
     if path.startswith("/providers/"):
         return "/providers/{provider_id}"
     if path.startswith("/providers"):
         return "/providers"
     return path
-
-
-def load_initial_providers() -> None:
-    raw = json.loads(INITIAL_PROVIDERS)
-    for item in raw:
-        record = ProviderRecord(**item)
-        provider_store[record.provider_id] = record
-
-
-def get_cooldown_seconds() -> int:
-    return max(int(os.getenv("PROVIDER_COOLDOWN_SECONDS", "30")), 1)
-
-
-def reconcile_provider(provider: ProviderRecord) -> ProviderRecord:
-    if (
-        provider.health_status == "unhealthy"
-        and provider.cooldown_until is not None
-        and provider.cooldown_until <= time.time()
-    ):
-        return provider.model_copy(
-            update={
-                "health_status": "healthy",
-                "cooldown_until": None,
-                "failure_count": 0,
-            }
-        )
-    return provider
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    load_initial_providers()
 
 
 @app.middleware("http")
@@ -198,6 +211,7 @@ async def register_provider(payload: ProviderUpsertRequest, request: Request) ->
         record = ProviderRecord(**payload.model_dump())
         with provider_lock:
             provider_store[record.provider_id] = record
+            _persist()
         REGISTRY_OPERATIONS.labels(
             operation="register",
             result="updated" if existed else "created",
@@ -207,10 +221,12 @@ async def register_provider(payload: ProviderUpsertRequest, request: Request) ->
 
 @app.get("/providers", response_model=list[ProviderRecord])
 async def list_providers(
+    request: Request,
     enabled_only: bool = Query(default=False),
     healthy_only: bool = Query(default=False),
     model: str | None = Query(default=None),
 ) -> list[ProviderRecord]:
+    require_bearer_token(request, ADMIN_API_TOKEN, "provider-registry")
     with tracer.start_as_current_span("provider_registry.list") as span:
         span.set_attribute("provider.enabled_only", enabled_only)
         span.set_attribute("provider.healthy_only", healthy_only)
@@ -233,7 +249,8 @@ async def list_providers(
 
 
 @app.get("/providers/{provider_id}", response_model=ProviderRecord)
-async def get_provider(provider_id: str) -> ProviderRecord:
+async def get_provider(provider_id: str, request: Request) -> ProviderRecord:
+    require_bearer_token(request, ADMIN_API_TOKEN, "provider-registry")
     with provider_lock:
         provider = provider_store.get(provider_id)
         if provider is not None:
@@ -256,6 +273,7 @@ async def disable_provider(provider_id: str, request: Request) -> ProviderRecord
             raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
         updated = provider.model_copy(update={"enabled": False})
         provider_store[provider_id] = updated
+        _persist()
     REGISTRY_OPERATIONS.labels(operation="disable", result="success").inc()
     return updated
 
@@ -277,8 +295,21 @@ async def enable_provider(provider_id: str, request: Request) -> ProviderRecord:
             }
         )
         provider_store[provider_id] = updated
+        _persist()
     REGISTRY_OPERATIONS.labels(operation="enable", result="success").inc()
     return updated
+
+
+@app.delete("/providers/{provider_id}", status_code=204)
+async def delete_provider(provider_id: str, request: Request) -> None:
+    require_bearer_token(request, ADMIN_API_TOKEN, "provider-registry")
+    with provider_lock:
+        if provider_id not in provider_store:
+            REGISTRY_OPERATIONS.labels(operation="delete", result="not_found").inc()
+            raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+        del provider_store[provider_id]
+        _persist()
+    REGISTRY_OPERATIONS.labels(operation="delete", result="success").inc()
 
 
 @app.post("/providers/{provider_id}/report-health", response_model=ProviderRecord)
@@ -324,6 +355,7 @@ async def report_provider_health(
                 )
 
             provider_store[provider_id] = updated
+            _persist()
 
         REGISTRY_OPERATIONS.labels(operation="report_health", result="success").inc()
         return updated

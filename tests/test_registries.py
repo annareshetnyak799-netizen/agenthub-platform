@@ -9,7 +9,11 @@ from tests.helpers import (
 
 
 def test_provider_registry_lists_initial_providers() -> None:
-    response = requests.get(f"{PROVIDER_REGISTRY_URL}/providers", timeout=DEFAULT_TIMEOUT)
+    response = requests.get(
+        f"{PROVIDER_REGISTRY_URL}/providers",
+        headers=admin_headers(),
+        timeout=DEFAULT_TIMEOUT,
+    )
 
     assert response.status_code == 200
     providers = response.json()
@@ -50,7 +54,11 @@ def test_provider_registry_can_register_and_disable_provider() -> None:
 
 
 def test_agent_registry_lists_initial_agents() -> None:
-    response = requests.get(f"{AGENT_REGISTRY_URL}/agents", timeout=DEFAULT_TIMEOUT)
+    response = requests.get(
+        f"{AGENT_REGISTRY_URL}/agents",
+        headers=admin_headers(),
+        timeout=DEFAULT_TIMEOUT,
+    )
 
     assert response.status_code == 200
     agents = response.json()
@@ -79,6 +87,7 @@ def test_agent_registry_can_register_new_agent_card() -> None:
 
     get_response = requests.get(
         f"{AGENT_REGISTRY_URL}/agents/pytest-agent",
+        headers=admin_headers(),
         timeout=DEFAULT_TIMEOUT,
     )
     assert get_response.status_code == 200

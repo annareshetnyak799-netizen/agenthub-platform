@@ -59,6 +59,7 @@ export default function () {
   const registryResponse = http.get(
     `${providerRegistryUrl}/providers/mock-openai`,
     {
+      headers: { Authorization: `Bearer ${adminToken}` },
       timeout: "30s",
     },
   );

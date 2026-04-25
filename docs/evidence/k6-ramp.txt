@@ -1,0 +1,31 @@
+execution: local
+script: /scripts/k6_ramp.js
+
+scenarios:
+- default: Up to 20 looping VUs for 1m45s over 3 stages
+
+THRESHOLDS
+- http_req_duration p(95)<3000: passed, p(95)=1.24s
+- http_req_duration p(99)<5000: passed, p(99)=1.46s
+- http_req_failed rate<0.05: passed, rate=0.00%
+
+TOTAL RESULTS
+- checks_total: 1896
+- checks_succeeded: 100.00%
+- checks_failed: 0.00%
+- ramp load returns 200: passed
+- provider header is present: passed
+
+HTTP
+- http_req_duration avg=762.72ms med=723.06ms p(90)=1.12s p(95)=1.24s max=2.15s
+- http_req_failed=0.00% (0 out of 948)
+- http_reqs=948
+
+EXECUTION
+- iteration_duration avg=1.76s p(95)=2.24s max=3.15s
+- iterations=948
+- vus min=1 max=20
+
+NETWORK
+- data_received=475 kB
+- data_sent=281 kB

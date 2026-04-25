@@ -14,20 +14,37 @@ services:
       GATEWAY_PORT: 8000
       PLATFORM_API_TOKEN: agenthub-client-token
       ADMIN_API_TOKEN: agenthub-admin-token
+      ALLOWED_API_KEYS: >
+        [
+          {"token": "agenthub-client-token", "key_id": "default-client", "name": "Default Client"},
+          {"token": "agenthub-k6-token", "key_id": "k6-load-test", "name": "k6 Load Test"}
+        ]
       MLFLOW_ENABLED: "true"
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_EXPERIMENT_NAME: agenthub-gateway-requests
     ports:
       - "8000:8000"
     depends_on:
-      - agent-registry
-      - mlflow
-      - mock-agent-summarizer
-      - mock-agent-classifier
-      - router-service
-      - otel-collector
+      agent-registry:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      mock-agent-summarizer:
+        condition: service_healthy
+      mock-agent-classifier:
+        condition: service_healthy
+      router-service:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -44,6 +61,7 @@ services:
       PROVIDER_REGISTRY_URL: http://provider-registry:8002
       ROUTER_HOST: 0.0.0.0
       ROUTER_PORT: 8001
+      ADMIN_API_TOKEN: agenthub-admin-token
       PROVIDER_CONFIG: >
         [
           {
@@ -64,13 +82,24 @@ services:
     ports:
       - "8005:8001"
     depends_on:
-      - agent-registry
-      - provider-registry
-      - mock-provider-openai
-      - mock-provider-anthropic
-      - otel-collector
+      agent-registry:
+        condition: service_healthy
+      provider-registry:
+        condition: service_healthy
+      mock-provider-openai:
+        condition: service_healthy
+      mock-provider-anthropic:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -91,8 +120,17 @@ services:
       BASE_LATENCY_MS: 250
     ports:
       - "8101:8101"
+    depends_on:
+      otel-collector:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8101/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8101/health')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -113,8 +151,17 @@ services:
       BASE_LATENCY_MS: 400
     ports:
       - "8102:8102"
+    depends_on:
+      otel-collector:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8102/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8102/health')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -128,6 +175,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       ADMIN_API_TOKEN: agenthub-admin-token
       PROVIDER_COOLDOWN_SECONDS: 30
+      DATA_DIR: /data
       INITIAL_PROVIDERS: >
         [
           {
@@ -157,10 +205,19 @@ services:
         ]
     ports:
       - "8006:8002"
+    volumes:
+      - provider-registry-data:/data
     depends_on:
-      - otel-collector
+      otel-collector:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8002/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -173,6 +230,7 @@ services:
       SERVICE_NAME: agent-registry
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       ADMIN_API_TOKEN: agenthub-admin-token
+      DATA_DIR: /data
       INITIAL_AGENTS: >
         [
           {
@@ -196,10 +254,19 @@ services:
         ]
     ports:
       - "8007:8003"
+    volumes:
+      - agent-registry-data:/data
     depends_on:
-      - otel-collector
+      otel-collector:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8003/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -215,9 +282,16 @@ services:
     ports:
       - "8201:8201"
     depends_on:
-      - otel-collector
+      otel-collector:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8201/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8201/health')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -233,9 +307,16 @@ services:
     ports:
       - "8202:8202"
     depends_on:
-      - otel-collector
+      otel-collector:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8202/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8202/health')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -248,15 +329,19 @@ services:
     environment:
       BASE_URL: http://api-gateway:8000
       MOCK_OPENAI_ADMIN_URL: http://mock-provider-openai:8101
+      MOCK_ANTHROPIC_ADMIN_URL: http://mock-provider-anthropic:8102
       PROVIDER_REGISTRY_URL: http://provider-registry:8002
       PLATFORM_API_TOKEN: agenthub-client-token
       ADMIN_API_TOKEN: agenthub-admin-token
     volumes:
       - ./tests/load:/scripts:ro
     depends_on:
-      - api-gateway
-      - mock-provider-openai
-      - provider-registry
+      api-gateway:
+        condition: service_healthy
+      mock-provider-openai:
+        condition: service_healthy
+      provider-registry:
+        condition: service_healthy
 
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -269,15 +354,29 @@ services:
       - "9090:9090"
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
     depends_on:
-      - agent-registry
-      - api-gateway
-      - provider-registry
-      - router-service
-      - mock-agent-summarizer
-      - mock-agent-classifier
-      - mock-provider-openai
-      - mock-provider-anthropic
+      agent-registry:
+        condition: service_healthy
+      api-gateway:
+        condition: service_healthy
+      provider-registry:
+        condition: service_healthy
+      router-service:
+        condition: service_healthy
+      mock-agent-summarizer:
+        condition: service_healthy
+      mock-agent-classifier:
+        condition: service_healthy
+      mock-provider-openai:
+        condition: service_healthy
+      mock-provider-anthropic:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   grafana:
     image: grafana/grafana:11.2.0
@@ -291,8 +390,15 @@ services:
     volumes:
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   jaeger:
     image: jaegertracing/all-in-one:1.59
@@ -303,6 +409,11 @@ services:
       COLLECTOR_OTLP_HTTP_HOST_PORT: 0.0.0.0:4318
     ports:
       - "16686:16686"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.16.2
@@ -317,6 +428,18 @@ services:
       - "5001:5000"
     volumes:
       - mlflow-data:/mlflow
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.107.0
@@ -327,8 +450,19 @@ services:
     ports:
       - "4317:4317"
       - "4318:4318"
+      - "13133:13133"
     depends_on:
-      - jaeger
+      jaeger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   mlflow-data:
+  prometheus-data:
+  grafana-data:
+  provider-registry-data:
+  agent-registry-data:
